@@ -593,6 +593,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_7C
         bool "Waveshare ESP32-S3-Touch-LCD-7C"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_S3ZERO_SALA
+        bool "Waveshare ESP32-S3-Zero Asistente Sala (SH1106)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_WAVESHARE_ESP32_TOUCH_LCD_3_5
         bool "Waveshare ESP32-Touch-LCD-3.5"
         depends on IDF_TARGET_ESP32
