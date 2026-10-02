@@ -1,0 +1,38 @@
+name: Build S3-Zero Sala
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - s3zero
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build s3zero-sala
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          source "$IDF_PATH/export.sh"
+          python scripts/build.py s3zero-sala --name s3zero-sala \
+            --language es-ES \
+            --wake-word wn9_jarvis_tts
+          echo "---- Tamano de la app vs particion (0x2F0000) ----"
+          ls -l build/*.bin
+          idf.py size || true
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: xiaozhi-s3zero-sala
+          path: build/merged-binary.bin
+          if-no-files-found: error
