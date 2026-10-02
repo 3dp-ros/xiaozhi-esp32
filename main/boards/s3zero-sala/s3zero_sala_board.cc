@@ -5,7 +5,8 @@
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
-#include "led/single_led.h"
+#include "face_display.h"
+#include "emotion_led.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -15,6 +16,22 @@
 #include <esp_lcd_panel_sh1106.h>
 
 #define TAG "S3ZeroSalaBoard"
+
+// INMP441 con ganancia digital extra (saturada a int16)
+class BoostedMicCodec : public NoAudioCodecSimplex {
+public:
+    using NoAudioCodecSimplex::NoAudioCodecSimplex;
+
+protected:
+    int Read(int16_t* dest, int samples) override {
+        int n = NoAudioCodecSimplex::Read(dest, samples);
+        for (int i = 0; i < n; i++) {
+            int32_t v = (int32_t)dest[i] * MIC_GAIN;
+            dest[i] = (v > INT16_MAX) ? INT16_MAX : (v < -INT16_MAX) ? -INT16_MAX : (int16_t)v;
+        }
+        return n;
+    }
+};
 
 class S3ZeroSalaBoard : public WifiBoard {
 private:
@@ -77,7 +94,7 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, false));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
-        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+        display_ = new FaceDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                    DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
     }
 
@@ -120,12 +137,13 @@ public:
     }
 
     virtual Led* GetLed() override {
-        static SingleLed led(BUILTIN_LED_GPIO);
+        static EmotionLed led(BUILTIN_LED_GPIO);
+        EmotionLed::instance = &led;
         return &led;
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
+        static BoostedMicCodec audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT,
             AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
         return &audio_codec;

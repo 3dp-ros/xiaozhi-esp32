@@ -6,6 +6,9 @@
 
 #include <driver/gpio.h>
 
+// Ganancia digital del microfono (1 = original). Sube el nivel para el wake word.
+#define MIC_GAIN 4
+
 #define AUDIO_INPUT_SAMPLE_RATE  16000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
 
@@ -19,8 +22,9 @@
 #define AUDIO_I2S_SPK_GPIO_BCLK GPIO_NUM_4
 #define AUDIO_I2S_SPK_GPIO_LRCK GPIO_NUM_5
 
-// WS2812 de estado
+// WS2812 de estado (color segun emocion)
 #define BUILTIN_LED_GPIO        GPIO_NUM_8
+#define LED_MAX_BRIGHTNESS      120   // 0-255
 
 // Boton BOOT de la placa (click: hablar / cortar; al arrancar: modo WiFi)
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
