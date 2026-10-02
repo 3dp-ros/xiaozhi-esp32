@@ -1,9 +1,10 @@
 #ifndef _FACE_DISPLAY_H_
 #define _FACE_DISPLAY_H_
 
-// Cara animada para OLED 128x64: dos ojos grandes (estilo ZzPet) que cambian
-// segun la emocion que manda el servidor y el estado del asistente.
-// La barra de estado de arriba (16 px) se mantiene para "Escuchando...", etc.
+// Cara animada a pantalla completa para OLED 128x64: dos ojos grandes
+// (estilo ZzPet) que cambian segun la emocion que manda el servidor y el
+// estado del asistente. Sin texto: el texto original solo aparece cuando
+// hace falta (configurar WiFi, codigo de activacion, actualizacion, error).
 
 #include "display/oled_display.h"
 #include "application.h"
@@ -25,65 +26,45 @@ public:
         DisplayLockGuard lock(this);
         auto screen = lv_screen_active();
 
-        // Ocultar el layout original (iconos, emoji y texto del chat)
-        lv_obj_t* original = lv_obj_get_child(screen, before);
-        if (original != nullptr) {
-            lv_obj_add_flag(original, LV_OBJ_FLAG_HIDDEN);
-        }
+        // Layout original de OledDisplay: [contenedor, barra de estado, popup bateria]
+        original_ = lv_obj_get_child(screen, before);
+        status_ = lv_obj_get_child(screen, before + 1);
 
         face_ = lv_obj_create(screen);
         Plain(face_);
         lv_obj_set_style_bg_opa(face_, LV_OPA_TRANSP, 0);
-        lv_obj_set_size(face_, LV_HOR_RES, kFaceH);
-        lv_obj_set_pos(face_, 0, LV_VER_RES - kFaceH);
-        lv_obj_move_to_index(face_, 0);
+        lv_obj_set_size(face_, LV_HOR_RES, LV_VER_RES);
+        lv_obj_set_pos(face_, 0, 0);
 
         for (int i = 0; i < 2; i++) {
-            eye_[i] = lv_obj_create(face_);
-            Plain(eye_[i]);
-            lv_obj_set_style_bg_color(eye_[i], lv_color_black(), 0);
-            lv_obj_set_style_bg_opa(eye_[i], LV_OPA_COVER, 0);
+            eye_[i] = MakeRect(face_);
+            arc_[i] = MakeLine(face_, 5);
+            brow_[i] = MakeLine(face_, 4);
 
-            arc_[i] = MakeLine(face_, 4);
-            brow_[i] = MakeLine(face_, 3);
-
-            blush_[i] = lv_obj_create(face_);
-            Plain(blush_[i]);
-            lv_obj_set_style_bg_color(blush_[i], lv_color_black(), 0);
-            lv_obj_set_style_bg_opa(blush_[i], LV_OPA_COVER, 0);
+            blush_[i] = MakeRect(face_);
             lv_obj_set_style_radius(blush_[i], 2, 0);
-            lv_obj_set_size(blush_[i], 8, 3);
+            lv_obj_set_size(blush_[i], 10, 3);
 
-            // Corazon: dos circulos + triangulo relleno con una linea en zigzag
+            // Corazon: dos circulos + triangulo hecho con barras horizontales
             for (int k = 0; k < 2; k++) {
-                lobe_[i][k] = lv_obj_create(face_);
-                Plain(lobe_[i][k]);
-                lv_obj_set_style_bg_color(lobe_[i][k], lv_color_black(), 0);
-                lv_obj_set_style_bg_opa(lobe_[i][k], LV_OPA_COVER, 0);
+                lobe_[i][k] = MakeRect(face_);
                 lv_obj_set_style_radius(lobe_[i][k], LV_RADIUS_CIRCLE, 0);
-                lv_obj_add_flag(lobe_[i][k], LV_OBJ_FLAG_HIDDEN);
             }
             for (int k = 0; k < kHeartRows; k++) {
-                heart_bar_[i][k] = lv_obj_create(face_);
-                Plain(heart_bar_[i][k]);
-                lv_obj_set_style_bg_color(heart_bar_[i][k], lv_color_black(), 0);
-                lv_obj_set_style_bg_opa(heart_bar_[i][k], LV_OPA_COVER, 0);
-                lv_obj_add_flag(heart_bar_[i][k], LV_OBJ_FLAG_HIDDEN);
+                heart_bar_[i][k] = MakeRect(face_);
             }
         }
 
-        bridge_ = lv_obj_create(face_);
-        Plain(bridge_);
-        lv_obj_set_style_bg_color(bridge_, lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(bridge_, LV_OPA_COVER, 0);
-        lv_obj_set_size(bridge_, kEyeX[1] - kEyeX[0] - 30, 3);
-        lv_obj_set_pos(bridge_, kEyeX[0] + 15, kCy - 4);
+        bridge_ = MakeRect(face_);
+        lv_obj_set_size(bridge_, kEyeX[1] - kEyeX[0] - 40, 3);
+        lv_obj_set_pos(bridge_, kEyeX[0] + 20, kCy - 5);
 
         next_blink_ = 60 + esp_random() % 40;
         timer_ = lv_timer_create([](lv_timer_t* t) {
             static_cast<FaceDisplay*>(lv_timer_get_user_data(t))->Tick();
         }, 50, this);
 
+        ApplyMode();
         Render();
     }
 
@@ -102,10 +83,12 @@ private:
         kWink, kCool, kSleepy, kSilly, kConfused, kEmbarrassed
     };
 
-    static constexpr int kFaceH = 48;
-    static constexpr int kCy = 24;
-    static constexpr int kEyeX[2] = {40, 88};
+    static constexpr int kCy = 32;
+    static constexpr int kEyeX[2] = {34, 94};
+    static constexpr int kHeartRows = 9;
 
+    lv_obj_t* original_ = nullptr;
+    lv_obj_t* status_ = nullptr;
     lv_obj_t* face_ = nullptr;
     lv_obj_t* eye_[2] = {};
     lv_obj_t* arc_[2] = {};
@@ -113,7 +96,6 @@ private:
     lv_obj_t* blush_[2] = {};
     lv_obj_t* bridge_ = nullptr;
     lv_obj_t* lobe_[2][2] = {};
-    static constexpr int kHeartRows = 7;
     lv_obj_t* heart_bar_[2][kHeartRows] = {};
     lv_timer_t* timer_ = nullptr;
 
@@ -126,6 +108,7 @@ private:
     int blink_left_ = 0;
     uint32_t idle_ticks_ = 0;
     uint32_t last_key_ = 0xFFFFFFFF;
+    int mode_ = -1;  // 0 = cara, 1 = texto informativo
 
     static lv_point_precise_t P(int x, int y) {
         lv_point_precise_t p;
@@ -139,6 +122,15 @@ private:
         lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_OFF);
         lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    static lv_obj_t* MakeRect(lv_obj_t* parent) {
+        lv_obj_t* o = lv_obj_create(parent);
+        Plain(o);
+        lv_obj_set_style_bg_color(o, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        return o;
     }
 
     static lv_obj_t* MakeLine(lv_obj_t* parent, int width) {
@@ -170,8 +162,26 @@ private:
     }
 
     static void Show(lv_obj_t* o, bool show) {
+        if (o == nullptr) return;
         if (show) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Estados donde hace falta leer texto (instrucciones WiFi, codigo, etc.)
+    static bool NeedsText(DeviceState s) {
+        return s == kDeviceStateStarting || s == kDeviceStateWifiConfiguring ||
+               s == kDeviceStateActivating || s == kDeviceStateUpgrading ||
+               s == kDeviceStateFatalError;
+    }
+
+    void ApplyMode() {
+        int mode = NeedsText(Application::GetInstance().GetDeviceState()) ? 1 : 0;
+        if (mode == mode_) return;
+        mode_ = mode;
+        Show(original_, mode == 1);
+        Show(status_, mode == 1);
+        Show(face_, mode == 0);
+        last_key_ = 0xFFFFFFFF;  // forzar redibujo de la cara
     }
 
     void Tick() {
@@ -185,20 +195,21 @@ private:
             blink_left_ = 3;  // ~150 ms con el ojo cerrado
             next_blink_ = tick_ + 60 + esp_random() % 50;  // cada 3 a 5,5 s
         }
+        ApplyMode();
         Render();
     }
 
     // Corazon centrado en (cx, cy): dos circulos arriba y un triangulo
     // hecho con barras horizontales (simetrico). grow = latido.
     void DrawHeart(int i, int cx, int cy, int grow) {
-        int r = 7 + grow / 2;
+        int r = 9 + grow / 2;
         for (int k = 0; k < 2; k++) {
-            int lx = cx + (k ? 6 : -6);
+            int lx = cx + (k ? 8 : -8);
             lv_obj_set_size(lobe_[i][k], r * 2, r * 2);
-            lv_obj_set_pos(lobe_[i][k], lx - r, cy - 4 - r);
+            lv_obj_set_pos(lobe_[i][k], lx - r, cy - 6 - r);
         }
-        int top = cy - 1;
-        int half = 12 + grow;
+        int top = cy - 2;
+        int half = 16 + grow;
         int rows_h = 2;
         for (int k = 0; k < kHeartRows; k++) {
             int y = top + k * rows_h;
@@ -209,7 +220,7 @@ private:
     }
 
     void Render() {
-        if (face_ == nullptr) return;
+        if (face_ == nullptr || mode_ != 0) return;
         auto state = Application::GetInstance().GetDeviceState();
 
         Emotion emo = emotion_;
@@ -219,19 +230,19 @@ private:
         bool listening = state == kDeviceStateListening;
         bool speaking = state == kDeviceStateSpeaking;
         bool blinking = blink_left_ > 0;
-        int bob = speaking ? (((tick_ / 4) % 2) ? -1 : 1) : 0;
+        int bob = speaking ? (((tick_ / 4) % 2) ? -2 : 2) : 0;
         // Latido: los corazones se agrandan un instante cada ~1 s
         bool beat = emo == kLoving && (tick_ % 20) < 3;
 
         // Evita redibujar si nada cambio (el I2C de la OLED es lento)
         uint32_t key = emo | (listening << 5) | (speaking << 6) | (blinking << 7) |
-                       ((bob + 1) << 8) | (beat << 10);
+                       ((bob + 2) << 8) | (beat << 11);
         if (key == last_key_) return;
         last_key_ = key;
 
         for (int i = 0; i < 2; i++) {
             int cx = kEyeX[i];
-            int w = 22, h = 30, r = 8, dx = 0, dy = bob;
+            int w = 30, h = 42, r = 11, dx = 0, dy = bob;
             bool eye = true, arc = false, brow = false, blush = false;
 
             switch (emo) {
@@ -242,47 +253,47 @@ private:
                     eye = false;
                     break;
                 case kSad:
-                    h = 22; dy += 3; brow = true;
-                    brow_pts_[i][0] = P(cx - 12, kCy - (i ? 18 : 12));
-                    brow_pts_[i][1] = P(cx + 12, kCy - (i ? 12 : 18));
+                    h = 30; dy += 5; brow = true;
+                    brow_pts_[i][0] = P(cx - 16, kCy - (i ? 26 : 18));
+                    brow_pts_[i][1] = P(cx + 16, kCy - (i ? 18 : 26));
                     break;
                 case kAngry:
-                    h = 22; dy += 3; brow = true;
-                    brow_pts_[i][0] = P(cx - 12, kCy - (i ? 12 : 19));
-                    brow_pts_[i][1] = P(cx + 12, kCy - (i ? 19 : 12));
+                    h = 30; dy += 5; brow = true;
+                    brow_pts_[i][0] = P(cx - 16, kCy - (i ? 17 : 27));
+                    brow_pts_[i][1] = P(cx + 16, kCy - (i ? 27 : 17));
                     break;
                 case kSurprised:
-                    w = 30; h = 30; r = 15;
+                    w = 40; h = 40; r = 20;
                     break;
                 case kThinking:
-                    h = 24; dx = 7; dy -= 5;
+                    h = 32; dx = 9; dy -= 6;
                     break;
                 case kWink:
-                    if (i == 1) { h = 4; r = 2; }
+                    if (i == 1) { h = 5; r = 2; }
                     break;
                 case kCool:
-                    w = 30; h = 12; r = 3;
+                    w = 40; h = 16; r = 4;
                     break;
                 case kSleepy:
-                    w = 24; h = 4; r = 2; dy += 6;
+                    w = 32; h = 5; r = 2; dy += 8;
                     break;
                 case kSilly:
-                    if (i == 0) { w = 28; h = 34; r = 12; } else { w = 14; h = 14; r = 7; }
+                    if (i == 0) { w = 36; h = 46; r = 14; } else { w = 18; h = 18; r = 9; }
                     break;
                 case kConfused:
-                    if (i == 1) { w = 16; h = 14; r = 6; dy += 4; }
+                    if (i == 1) { w = 20; h = 18; r = 8; dy += 6; }
                     break;
                 case kEmbarrassed:
-                    h = 22; blush = true;
+                    h = 30; blush = true;
                     break;
                 case kNeutral:
                 default:
                     break;
             }
 
-            if (listening && emo == kNeutral) { w += 4; h += 4; r += 2; }
+            if (listening && emo == kNeutral) { w += 5; h += 6; r += 2; }
             bool can_blink = eye && emo != kSleepy && !(emo == kWink && i == 1);
-            if (blinking && can_blink) { h = 4; r = 2; }
+            if (blinking && can_blink) { h = 5; r = 2; }
 
             Show(eye_[i], eye);
             if (eye) {
@@ -293,9 +304,9 @@ private:
 
             Show(arc_[i], arc);
             if (arc) {
-                arc_pts_[i][0] = P(cx - 12, kCy + 5 + dy);
-                arc_pts_[i][1] = P(cx, kCy - 7 + dy);
-                arc_pts_[i][2] = P(cx + 12, kCy + 5 + dy);
+                arc_pts_[i][0] = P(cx - 16, kCy + 7 + dy);
+                arc_pts_[i][1] = P(cx, kCy - 9 + dy);
+                arc_pts_[i][2] = P(cx + 16, kCy + 7 + dy);
                 lv_line_set_points(arc_[i], arc_pts_[i], 3);
             }
 
@@ -313,7 +324,7 @@ private:
             }
 
             Show(blush_[i], blush);
-            lv_obj_set_pos(blush_[i], cx - 4 + (i ? 10 : -10), kCy + 15);
+            lv_obj_set_pos(blush_[i], cx - 5 + (i ? 12 : -12), kCy + 20);
         }
         Show(bridge_, emo == kCool);
     }
