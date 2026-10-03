@@ -5,6 +5,8 @@
 // igual que en el YAML de ESPHome: escuchando = azul pulsante,
 // hablando = color segun emocion, reposo = apagado.
 // Modo dormir y modo noche: apagado. Microfono silenciado: rojo tenue.
+// En reposo, cuando la cara hace un "momento" (silbar, estrella fugaz,
+// mosca...), el LED hace un arcoiris que se prende y se apaga suave.
 
 #include "led/led.h"
 #include "application.h"
@@ -17,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <atomic>
 
 class EmotionLed : public Led {
 public:
@@ -67,6 +70,13 @@ public:
         emo_r_ = r; emo_g_ = g; emo_b_ = b;
     }
 
+    // Arcoiris por un rato (lo pide la cara en los momentos del reposo)
+    void Rainbow(int duration_ms) {
+        int64_t now = esp_timer_get_time();
+        rainbow_start_ = now;
+        rainbow_end_ = now + (int64_t)duration_ms * 1000;
+    }
+
     void OnStateChanged() override {
         // El color se recalcula en cada Tick segun el estado actual
     }
@@ -78,6 +88,41 @@ private:
     float emo_r_ = 0.0f, emo_g_ = 1.0f, emo_b_ = 0.0f;
     uint32_t tick_ = 0;
     uint8_t last_r_ = 255, last_g_ = 255, last_b_ = 255;
+    std::atomic<int64_t> rainbow_start_{0};
+    std::atomic<int64_t> rainbow_end_{0};
+
+    // Color del arcoiris (h de 0 a 1)
+    static void Hue(float h, float& r, float& g, float& b) {
+        h = h - floorf(h);
+        float x = h * 6.0f;
+        int i = (int)x;
+        float f = x - i;
+        switch (i % 6) {
+            case 0: r = 1; g = f; b = 0; break;
+            case 1: r = 1 - f; g = 1; b = 0; break;
+            case 2: r = 0; g = 1; b = f; break;
+            case 3: r = 0; g = 1 - f; b = 1; break;
+            case 4: r = f; g = 0; b = 1; break;
+            default: r = 1; g = 0; b = 1 - f; break;
+        }
+    }
+
+    // Devuelve true si esta mostrando el arcoiris
+    bool ShowRainbow() {
+        int64_t now = esp_timer_get_time();
+        int64_t start = rainbow_start_.load(), end = rainbow_end_.load();
+        if (now >= end || end <= start) return false;
+        float total = (float)(end - start);
+        float t = (float)(now - start) / total;          // 0..1
+        float env = 1.0f;
+        float fade = 400000.0f / total;                   // 0,4 s de fundido
+        if (t < fade) env = t / fade;
+        else if (t > 1 - fade) env = (1 - t) / fade;
+        float r, g, b;
+        Hue((float)(now - start) / 2000000.0f, r, g, b);  // una vuelta cada 2 s
+        Show(r, g, b, 0.7f * env);
+        return true;
+    }
 
     void Show(float r, float g, float b, float level) {
         auto clamp = [](float v) { return v < 0 ? 0.0f : (v > 1 ? 1.0f : v); };
@@ -152,7 +197,7 @@ private:
                 break;
             case kDeviceStateIdle:
             default:
-                Show(0, 0, 0, 0);
+                if (!ShowRainbow()) Show(0, 0, 0, 0);
                 break;
         }
     }
