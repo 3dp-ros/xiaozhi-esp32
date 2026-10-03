@@ -29,7 +29,7 @@
 // Boton BOOT de la placa (click: hablar / cortar; al arrancar: modo WiFi)
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 
-// PIR HC-SR501 (expuesto como herramienta MCP)
+// PIR HC-SR501 (expuesto como herramienta MCP y sensor en Home Assistant)
 #define PIR_GPIO                GPIO_NUM_11
 
 // OLED SH1106 128x64 por I2C
@@ -47,9 +47,9 @@
 // ---- Home Assistant por MQTT (broker Mosquitto de HA) ----
 // Poner la IP de Home Assistant y el usuario/clave creados para MQTT.
 // Mientras HA_MQTT_HOST tenga una "X", el puente queda desactivado.
-#define HA_MQTT_HOST "192.168.100.X"
+#define HA_MQTT_HOST "192.168.100.78"
 #define HA_MQTT_PORT 1883
 #define HA_MQTT_USER "kira"
-#define HA_MQTT_PASS "cambiar"
+#define HA_MQTT_PASS "kira"
 
 #endif // _BOARD_CONFIG_H_
