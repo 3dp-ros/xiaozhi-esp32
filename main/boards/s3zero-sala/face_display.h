@@ -9,6 +9,7 @@
 #include "display/oled_display.h"
 #include "application.h"
 #include "emotion_led.h"
+#include "ha_bridge.h"
 
 #include <esp_random.h>
 #include <esp_log.h>
@@ -72,6 +73,7 @@ public:
         if (EmotionLed::instance != nullptr) {
             EmotionLed::instance->SetEmotion(emotion);
         }
+        HaBridge::Instance().OnEmotion(emotion);
         DisplayLockGuard lock(this);
         emotion_ = Parse(emotion);
         Render();

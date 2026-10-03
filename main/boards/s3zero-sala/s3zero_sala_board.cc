@@ -7,6 +7,7 @@
 #include "mcp_server.h"
 #include "face_display.h"
 #include "emotion_led.h"
+#include "ha_bridge.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -134,6 +135,7 @@ public:
         InitializeSh1106Display();
         InitializeButtons();
         InitializeTools();
+        HaBridge::Instance().Start();
     }
 
     virtual Led* GetLed() override {

@@ -44,4 +44,12 @@
 #define DISPLAY_MIRROR_X false
 #define DISPLAY_MIRROR_Y false
 
+// ---- Home Assistant por MQTT (broker Mosquitto de HA) ----
+// Poner la IP de Home Assistant y el usuario/clave creados para MQTT.
+// Mientras HA_MQTT_HOST tenga una "X", el puente queda desactivado.
+#define HA_MQTT_HOST "192.168.100.X"
+#define HA_MQTT_PORT 1883
+#define HA_MQTT_USER "kira"
+#define HA_MQTT_PASS "cambiar"
+
 #endif // _BOARD_CONFIG_H_
