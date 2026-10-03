@@ -18,21 +18,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Build s3zero-sala
+      - name: Build Hey Kira
         shell: bash
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           source "$IDF_PATH/export.sh"
+          mkdir -p out
+
           python scripts/build.py s3zero-sala --name s3zero-sala \
             --language es-ES \
-            --wake-word wn9_jarvis_tts
-          echo "---- Tamano de la app vs particion (0x2F0000) ----"
-          ls -l build/*.bin
-          idf.py size || true
+            --wake-word wn9_heykira_tts3
+          cp build/merged-binary.bin out/xiaozhi-kira.bin
+
+          ls -l out
 
       - name: Upload firmware
         uses: actions/upload-artifact@v7
         with:
           name: xiaozhi-s3zero-sala
-          path: build/merged-binary.bin
+          path: out/*.bin
           if-no-files-found: error
