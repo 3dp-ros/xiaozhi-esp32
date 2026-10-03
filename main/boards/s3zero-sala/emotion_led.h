@@ -4,10 +4,12 @@
 // LED WS2812 que sigue el estado del asistente y el color de la emocion,
 // igual que en el YAML de ESPHome: escuchando = azul pulsante,
 // hablando = color segun emocion, reposo = apagado.
+// Modo dormir y modo noche: apagado. Microfono silenciado: rojo tenue.
 
 #include "led/led.h"
 #include "application.h"
 #include "config.h"
+#include "kira_controls.h"
 
 #include <led_strip.h>
 #include <esp_timer.h>
@@ -108,7 +110,20 @@ private:
             r = emo_r_; g = emo_g_; b = emo_b_;
         }
 
-        switch (app.GetDeviceState()) {
+        auto& ctl = kira::Controls::Get();
+        auto state = app.GetDeviceState();
+        bool busy = state == kDeviceStateSpeaking || state == kDeviceStateNotifying ||
+                    state == kDeviceStateListening;
+        if (ctl.Sleep() || (ctl.Night() && !busy)) {
+            Show(0, 0, 0, 0);
+            return;
+        }
+        if (ctl.Mute() && state == kDeviceStateIdle) {
+            Show(1, 0, 0, 0.15f);
+            return;
+        }
+
+        switch (state) {
             case kDeviceStateStarting:
                 Show(0, 0, 1, blink_fast ? 1.0f : 0.0f);
                 break;

@@ -8,6 +8,12 @@
 //   sensor         Estado       (reposo, escuchando, hablando...)
 //   sensor         Emocion      (ultima emocion de Kira)
 //   number         Volumen      (0-100)
+//   number         Sensibilidad microfono (1-12, se guarda en la placa)
+//   number         Brillo pantalla (1-100 %)
+//   switch         Modo dormir  (pantalla/LED apagados; "Ey Kira" lo despierta)
+//   switch         Silenciar microfono (no escucha nada; se reactiva desde HA)
+//   switch         Modo noche   (pantalla al minimo, LED apagado)
+//   sensor         Senal WiFi   (dBm)
 //   button         Escuchar     (activa a Kira como el wake word)
 //   notify         Anunciar     (publica el texto en kira/sala/decir)
 //
@@ -19,8 +25,11 @@
 #include "application.h"
 #include "board.h"
 #include "config.h"
+#include "mic_gain.h"
+#include "kira_controls.h"
 
 #include <mqtt.h>
+#include <wifi_manager.h>
 #include <cJSON.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -69,6 +78,10 @@ private:
     std::string last_emotion_;
     int last_motion_ = -1;
     int last_volume_ = -1;
+    int last_mic_gain_ = -1;
+    int last_bright_ = -1;
+    int last_sleep_ = -1, last_mute_ = -1, last_night_ = -1;
+    int rssi_ticks_ = 0;
 
     static std::string T(const char* suffix) { return std::string(kBase) + "/" + suffix; }
 
@@ -92,6 +105,26 @@ private:
         pub("number", "volumen",
             "\"name\":\"Volumen\",\"icon\":\"mdi:volume-high\",\"min\":0,\"max\":100,\"step\":5,"
             "\"state_topic\":\"" + T("volumen") + "\",\"command_topic\":\"" + T("volumen/set") + "\"");
+        pub("number", "microfono",
+            "\"name\":\"Sensibilidad microfono\",\"icon\":\"mdi:microphone-settings\",\"min\":1,\"max\":12,\"step\":1,"
+            "\"mode\":\"slider\",\"entity_category\":\"config\","
+            "\"state_topic\":\"" + T("microfono") + "\",\"command_topic\":\"" + T("microfono/set") + "\"");
+        pub("number", "brillo",
+            "\"name\":\"Brillo pantalla\",\"icon\":\"mdi:brightness-6\",\"min\":1,\"max\":100,\"step\":1,"
+            "\"unit_of_measurement\":\"%\",\"mode\":\"slider\",\"entity_category\":\"config\","
+            "\"state_topic\":\"" + T("brillo") + "\",\"command_topic\":\"" + T("brillo/set") + "\"");
+        auto sw = [&](const char* obj, const char* name, const char* icon) {
+            pub("switch", obj,
+                std::string("\"name\":\"") + name + "\",\"icon\":\"" + icon + "\","
+                "\"state_topic\":\"" + T(obj) + "\",\"command_topic\":\"" + T(obj) + "/set\"");
+        };
+        sw("dormir", "Modo dormir", "mdi:sleep");
+        sw("silencio", "Silenciar microfono", "mdi:microphone-off");
+        sw("noche", "Modo noche", "mdi:weather-night");
+        pub("sensor", "wifi",
+            "\"name\":\"Senal WiFi\",\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\","
+            "\"state_class\":\"measurement\",\"entity_category\":\"diagnostic\","
+            "\"state_topic\":\"" + T("wifi") + "\"");
         pub("button", "escuchar",
             "\"name\":\"Escuchar\",\"icon\":\"mdi:microphone\",\"command_topic\":\"" + T("escuchar") + "\"");
         pub("notify", "anunciar",
@@ -103,6 +136,11 @@ private:
         mqtt_->Subscribe(T("audio"), 1);
         mqtt_->Subscribe(T("escuchar"), 1);
         mqtt_->Subscribe(T("volumen/set"), 1);
+        mqtt_->Subscribe(T("microfono/set"), 1);
+        mqtt_->Subscribe(T("brillo/set"), 1);
+        mqtt_->Subscribe(T("dormir/set"), 1);
+        mqtt_->Subscribe(T("silencio/set"), 1);
+        mqtt_->Subscribe(T("noche/set"), 1);
         mqtt_->Subscribe("homeassistant/status", 1);
         PublishDiscovery();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -140,6 +178,18 @@ private:
             Application::GetInstance().Schedule([vol]() {
                 Board::GetInstance().GetAudioCodec()->SetOutputVolume(vol);
             });
+        } else if (topic == T("microfono/set")) {
+            int gain = atoi(payload.c_str());
+            mic_gain::Set(gain);
+            ESP_LOGI(kTag, "Sensibilidad de microfono: %d", mic_gain::Get());
+        } else if (topic == T("brillo/set")) {
+            kira::Controls::Get().SetBrightness(atoi(payload.c_str()));
+        } else if (topic == T("dormir/set")) {
+            kira::Controls::Get().SetSleep(payload == "ON");
+        } else if (topic == T("silencio/set")) {
+            kira::Controls::Get().SetMute(payload == "ON");
+        } else if (topic == T("noche/set")) {
+            kira::Controls::Get().SetNight(payload == "ON");
         } else if (topic == "homeassistant/status" && payload == "online") {
             // HA se reinicio: volver a anunciar las entidades y sus estados
             PublishDiscovery();
@@ -190,6 +240,28 @@ private:
         }
         if (all || emotion != last_emotion_) {
             if (mqtt_->Publish(T("emocion"), emotion)) last_emotion_ = emotion;
+        }
+        int gain = mic_gain::Get();
+        if (all || gain != last_mic_gain_) {
+            if (mqtt_->Publish(T("microfono"), std::to_string(gain))) last_mic_gain_ = gain;
+        }
+        auto& ctl = kira::Controls::Get();
+        auto pub_flag = [&](const char* obj, bool v, int& last) {
+            if (all || (int)v != last) {
+                if (mqtt_->Publish(T(obj), v ? "ON" : "OFF")) last = v;
+            }
+        };
+        pub_flag("dormir", ctl.Sleep(), last_sleep_);
+        pub_flag("silencio", ctl.Mute(), last_mute_);
+        pub_flag("noche", ctl.Night(), last_night_);
+        int bright = ctl.Brightness();
+        if (all || bright != last_bright_) {
+            if (mqtt_->Publish(T("brillo"), std::to_string(bright))) last_bright_ = bright;
+        }
+        // Senal WiFi: cada ~30 s
+        if (all || ++rssi_ticks_ >= 150) {
+            rssi_ticks_ = 0;
+            mqtt_->Publish(T("wifi"), std::to_string(WifiManager::GetInstance().GetRssi()));
         }
         int volume = Board::GetInstance().GetAudioCodec()->output_volume();
         if (all || volume != last_volume_) {

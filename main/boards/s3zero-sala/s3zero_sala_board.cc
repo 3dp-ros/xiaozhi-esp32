@@ -8,6 +8,8 @@
 #include "face_display.h"
 #include "emotion_led.h"
 #include "ha_bridge.h"
+#include "mic_gain.h"
+#include "kira_controls.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -15,10 +17,17 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_sh1106.h>
+#include <cmath>
 
 #define TAG "S3ZeroSalaBoard"
 
-// INMP441 con ganancia digital extra (saturada a int16)
+// INMP441 con procesamiento de entrada:
+//  1) Filtro pasa-altos (~80 Hz): saca la continua del INMP441 y el zumbido
+//     grave, que al amplificarse saturaban el audio.
+//  2) Ganancia ajustable desde Home Assistant (Sensibilidad microfono).
+//  3) Limitador suave: los picos se redondean en vez de cortarse de golpe,
+//     asi la voz no suena "rota" aunque se hable fuerte o cerca.
+//  4) Silencio total si el microfono esta silenciado desde Home Assistant.
 class BoostedMicCodec : public NoAudioCodecSimplex {
 public:
     using NoAudioCodecSimplex::NoAudioCodecSimplex;
@@ -26,12 +35,35 @@ public:
 protected:
     int Read(int16_t* dest, int samples) override {
         int n = NoAudioCodecSimplex::Read(dest, samples);
+        if (kira::Controls::Get().MicOff()) {
+            for (int i = 0; i < n; i++) dest[i] = 0;
+            return n;
+        }
+        const float gain = (float)mic_gain::Get();
+        constexpr float kR = 0.969f;          // pasa-altos de 1er orden, ~80 Hz a 16 kHz
+        constexpr float kKnee = 16000.0f;     // a partir de aca empieza a comprimir
+        constexpr float kMax = 32000.0f;
+        constexpr float kRange = kMax - kKnee;
         for (int i = 0; i < n; i++) {
-            int32_t v = (int32_t)dest[i] * MIC_GAIN;
-            dest[i] = (v > INT16_MAX) ? INT16_MAX : (v < -INT16_MAX) ? -INT16_MAX : (int16_t)v;
+            float x = (float)dest[i];
+            float y = x - hp_x_ + kR * hp_y_;
+            hp_x_ = x;
+            hp_y_ = y;
+            float v = y * gain;
+            float a = fabsf(v);
+            if (a > kKnee) {
+                float over = (a - kKnee) / kRange;
+                a = kKnee + kRange * tanhf(over);
+                v = (v < 0) ? -a : a;
+            }
+            dest[i] = (int16_t)v;
         }
         return n;
     }
+
+private:
+    float hp_x_ = 0.0f;
+    float hp_y_ = 0.0f;
 };
 
 class S3ZeroSalaBoard : public WifiBoard {
@@ -95,8 +127,10 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, false));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
-        display_ = new FaceDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                                   DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+        auto face = new FaceDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                    DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+        face->SetPanel(panel_io_, panel_);
+        display_ = face;
     }
 
     void InitializeButtons() {
@@ -104,6 +138,13 @@ private:
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
+                return;
+            }
+            // Si dormia o tenia el microfono silenciado, el boton lo despierta
+            auto& ctl = kira::Controls::Get();
+            if (ctl.Sleep() || ctl.Mute()) {
+                ctl.SetSleep(false);
+                ctl.SetMute(false);
                 return;
             }
             app.ToggleChatState();
@@ -131,11 +172,19 @@ private:
 
 public:
     S3ZeroSalaBoard() : boot_button_(BOOT_BUTTON_GPIO) {
+        mic_gain::Load();
+        kira::Controls::Get().Load();
         InitializeDisplayI2c();
         InitializeSh1106Display();
         InitializeButtons();
         InitializeTools();
         HaBridge::Instance().Start();
+    }
+
+    // Siempre enchufado: el WiFi nunca entra en ahorro de energia.
+    // El ahorro sumaba demora a la primera respuesta y cortes de audio.
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        WifiBoard::SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
     }
 
     virtual Led* GetLed() override {
