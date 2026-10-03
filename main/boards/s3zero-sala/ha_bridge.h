@@ -9,18 +9,19 @@
 //   sensor         Emocion      (ultima emocion de Kira)
 //   number         Volumen      (0-100)
 //   button         Escuchar     (activa a Kira como el wake word)
-//   notify         Anunciar     (Kira dice en voz alta el texto recibido)
+//   notify         Anunciar     (publica el texto en kira/sala/decir)
 //
-// Para que Kira diga un aviso desde una automatizacion:
-//   action: notify.send_message
-//   target: { entity_id: notify.kira_sala_anunciar }
-//   data:   { message: "Saca la jarra" }
+// Avisos por voz: Home Assistant genera el audio con su TTS (Ogg Opus) y
+// publica {"url": "...", "text": "..."} en kira/sala/audio. El firmware lo
+// reproduce con su reproductor de notificaciones. El paso texto -> audio lo
+// hace el script "Kira decir" en HA (ver instrucciones).
 
 #include "application.h"
 #include "board.h"
 #include "config.h"
 
 #include <mqtt.h>
+#include <cJSON.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <driver/gpio.h>
@@ -60,7 +61,8 @@ private:
     bool resend_all_ = true;
 
     std::string emotion_ = "neutral";
-    std::string pending_say_;
+    std::string pending_url_;
+    std::string pending_text_;
     int pending_wait_ = 0;
 
     std::string last_state_;
@@ -98,7 +100,7 @@ private:
 
     void OnConnected() {
         ESP_LOGI(kTag, "Conectado al broker de Home Assistant");
-        mqtt_->Subscribe(T("decir"), 1);
+        mqtt_->Subscribe(T("audio"), 1);
         mqtt_->Subscribe(T("escuchar"), 1);
         mqtt_->Subscribe(T("volumen/set"), 1);
         mqtt_->Subscribe("homeassistant/status", 1);
@@ -107,25 +109,23 @@ private:
         resend_all_ = true;
     }
 
-    static std::string Sanitize(const std::string& in) {
-        // El texto viaja dentro de un JSON armado a mano: sin comillas,
-        // barras ni saltos de linea, y con un largo razonable.
-        std::string out;
-        for (char c : in) {
-            if (c == '"') out += '\'';
-            else if (c == '\\' || c == '\n' || c == '\r' || c == '\t') out += ' ';
-            else out += c;
-            if (out.size() >= 220) break;
-        }
-        return out;
-    }
-
     void OnMessage(const std::string& topic, const std::string& payload) {
-        if (topic == T("decir")) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pending_say_ = Sanitize(payload);
-            pending_wait_ = 0;
-            ESP_LOGI(kTag, "Aviso recibido: %s", pending_say_.c_str());
+        if (topic == T("audio")) {
+            cJSON* root = cJSON_Parse(payload.c_str());
+            if (root == nullptr) {
+                ESP_LOGW(kTag, "Aviso con JSON invalido");
+                return;
+            }
+            cJSON* url = cJSON_GetObjectItem(root, "url");
+            cJSON* text = cJSON_GetObjectItem(root, "text");
+            if (cJSON_IsString(url) && url->valuestring[0] != '\0') {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_url_ = url->valuestring;
+                pending_text_ = cJSON_IsString(text) ? text->valuestring : "";
+                pending_wait_ = 0;
+                ESP_LOGI(kTag, "Aviso recibido: %s", pending_text_.c_str());
+            }
+            cJSON_Delete(root);
         } else if (topic == T("escuchar")) {
             Application::GetInstance().Schedule([]() {
                 auto& app = Application::GetInstance();
@@ -198,11 +198,12 @@ private:
     }
 
     void ProcessPendingSay() {
-        std::string text;
+        std::string url, text;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (pending_say_.empty()) return;
-            text = pending_say_;
+            if (pending_url_.empty()) return;
+            url = pending_url_;
+            text = pending_text_;
         }
         auto& app = Application::GetInstance();
         if (app.GetDeviceState() != kDeviceStateIdle) {
@@ -210,19 +211,16 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             if (++pending_wait_ > 450) {
                 ESP_LOGW(kTag, "Aviso descartado, Kira estuvo ocupada: %s", text.c_str());
-                pending_say_.clear();
+                pending_url_.clear();
             }
             return;
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pending_say_.clear();
+            pending_url_.clear();
         }
-        std::string prompt =
-            "Aviso automatico de la casa, no es una pregunta de David. "
-            "Decile en voz alta, en una sola frase breve y sin preguntar nada: " + text;
-        ESP_LOGI(kTag, "Anunciando: %s", text.c_str());
-        app.WakeWordInvoke(prompt);
+        ESP_LOGI(kTag, "Reproduciendo aviso: %s", text.c_str());
+        app.PlayNotification(url, text);
     }
 
     void Loop() {

@@ -118,6 +118,18 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+
+    // [s3zero-sala] Reproduce un aviso de voz (Ogg Opus por HTTP) generado
+    // por Home Assistant. El firmware solo lo acepta con el dispositivo en Idle.
+    void PlayNotification(const std::string& audio_url, const std::string& text) {
+        Schedule([this, audio_url, text]() {
+            std::vector<NotifySubtitle> subtitles;
+            if (!text.empty()) {
+                subtitles.push_back({.start_ms = 0, .text = text});
+            }
+            StartNotification(audio_url, std::move(subtitles));
+        });
+    }
     
     /**
      * Reset protocol resources (thread-safe)
