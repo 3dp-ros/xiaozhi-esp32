@@ -165,10 +165,9 @@ private:
     float look_tx_ = 0, look_ty_ = 0;
     uint32_t next_look_ = 60, look_hold_until_ = 0;
     int bounce_t_ = -1;
-    // Pirueta al sonar el "pop": se agacha, salta girando 360 y aterriza
-    static constexpr int kSpinPrep = 3;     // agachada
-    static constexpr int kSpinAir = 15;     // salto + giro (~600 ms)
-    static constexpr int kSpinLand = 4;     // aterrizaje
+    // Pirueta al sonar el "pop": sacude la cabeza inclinandose y queda contento
+    static constexpr int kShakeTicks = 18;  // sacudida (~720 ms)
+    static constexpr int kHappyTicks = 8;   // ojos ^^ al final (~320 ms)
     int spin_t_ = -1;
     uint32_t last_cue_ = 0;
     Moment moment_ = kMomNone;
@@ -470,7 +469,7 @@ private:
         }
 
         if (bounce_t_ >= 0 && ++bounce_t_ > 12) bounce_t_ = -1;
-        if (spin_t_ >= 0 && ++spin_t_ >= kSpinPrep + kSpinAir + kSpinLand) spin_t_ = -1;
+        if (spin_t_ >= 0 && ++spin_t_ >= kShakeTicks + kHappyTicks) spin_t_ = -1;
     }
 
     // ================= pose: a donde tiene que ir cada parte =================
@@ -747,30 +746,22 @@ private:
             mdy += dy;
         }
 
-        // Pirueta: giro sobre el eje vertical (los ojos se cruzan y se
-        // afinan como si la cabeza diera una vuelta) mientras salta
+        // Pirueta "sacudida": la cabeza va y viene de lado a lado inclinandose
+        // (un ojo sube y el otro baja), cada vez mas suave, y termina con ^^
         if (spin_t_ >= 0) {
             const int t = spin_t_;
-            float dy = 0, c = 1.0f;
-            bool squash = false;
-            if (t < kSpinPrep) {
-                squash = true; dy = 3;
-            } else if (t < kSpinPrep + kSpinAir) {
-                float p = (t - kSpinPrep) / (float)kSpinAir;     // 0..1
-                dy = -9.0f * sinf(p * 3.1415926f);
-                c = cosf(p * 6.2831853f);
+            if (t < kShakeTicks) {
+                float decay = 1.0f - t / (float)kShakeTicks;
+                float sw = sinf(t * 1.3f) * decay;
+                for (int i = 0; i < 2; i++) {
+                    tgt_[i].x += 7.0f * sw;
+                    tgt_[i].y += (i == 0 ? 4.0f : -4.0f) * sw;
+                }
+                mdx += 7.0f * sw;
             } else {
-                squash = true; dy = 2;
+                want_[0] = want_[1] = kArcUp;
+                mk = kMSmile; mw = 15; mh = 6;
             }
-            for (auto& e : tgt_) {
-                e.x = kCx + (e.x - kCx) * c;
-                e.w = fmaxf(2.0f, e.w * fabsf(c));
-                e.y += dy;
-                if (squash) { e.h -= 7; e.w += 3; e.y += 2; }
-            }
-            mdx *= c;
-            mw = fmaxf(2.0f, mw * fabsf(c));
-            mdy += dy;
         }
 
         // Parpadeo (solo con ojos normales)
