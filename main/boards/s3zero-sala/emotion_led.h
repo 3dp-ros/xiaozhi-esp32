@@ -182,8 +182,8 @@ private:
                 Show(0, 1, 0, blink_slow ? 1.0f : 0.0f);
                 break;
             case kDeviceStateConnecting:
-                // Azul parpadeando rapido: todavia no hables
-                Show(0, 0, 1, blink_fast ? 1.0f : 0.0f);
+                // Azul fijo: el audio se guarda mientras conecta, se puede hablar
+                Show(0, 0, 1, 0.6f);
                 break;
             case kDeviceStateListening:
             case kDeviceStateAudioTesting:

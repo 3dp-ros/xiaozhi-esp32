@@ -26,6 +26,10 @@
 #define BUILTIN_LED_GPIO        GPIO_NUM_8
 #define LED_MAX_BRIGHTNESS      120   // 0-255
 
+// Demora de la senal visual de "escuchando" (ver listen_ready.h).
+// En 0: con el buffer de audio se puede hablar apenas se detecta el wake word.
+#define LISTEN_READY_MS 0
+
 // LED RGB de la placa (WS2812 interno), usado para diagnostico
 #define DIAG_LED_GPIO           GPIO_NUM_21
 
