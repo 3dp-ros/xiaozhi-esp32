@@ -632,6 +632,10 @@ void Application::InitializeProtocol() {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
+                            // [s3zero-sala] "Pop" cuando Kira termina de hablar y
+                            // queda esperando respuesta. Se reproduce recien cuando
+                            // se vacia el audio de la respuesta (StartListeningAudio).
+                            play_popup_on_listening_ = true;
                             SetDeviceState(kDeviceStateListening);
                         }
                     }
