@@ -26,6 +26,7 @@
 #include "ha_bridge.h"
 #include "config.h"
 #include "kira_controls.h"
+#include "listen_ready.h"
 
 #include <esp_random.h>
 #include <driver/gpio.h>
@@ -316,7 +317,8 @@ private:
             }
         }
 
-        auto state = app.GetDeviceState();
+        // "Escuchando" recien cuando el audio ya sale (ver listen_ready.h)
+        auto state = listen_ready::EffectiveState(app.GetDeviceState());
         idle_ticks_ = (state == kDeviceStateIdle) ? idle_ticks_ + 1 : 0;
 
         // Saltito cuando empieza a escuchar (wake word o boton)

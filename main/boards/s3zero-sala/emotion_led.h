@@ -12,6 +12,7 @@
 #include "application.h"
 #include "config.h"
 #include "kira_controls.h"
+#include "listen_ready.h"
 
 #include <led_strip.h>
 #include <esp_timer.h>
@@ -156,7 +157,8 @@ private:
         }
 
         auto& ctl = kira::Controls::Get();
-        auto state = app.GetDeviceState();
+        // Azul fijo recien cuando el audio ya sale (ver listen_ready.h)
+        auto state = listen_ready::EffectiveState(app.GetDeviceState());
         bool busy = state == kDeviceStateSpeaking || state == kDeviceStateNotifying ||
                     state == kDeviceStateListening;
         if (ctl.Sleep() || (ctl.Night() && !busy)) {
@@ -180,7 +182,8 @@ private:
                 Show(0, 1, 0, blink_slow ? 1.0f : 0.0f);
                 break;
             case kDeviceStateConnecting:
-                Show(0, 0, 1, 1.0f);
+                // Azul parpadeando rapido: todavia no hables
+                Show(0, 0, 1, blink_fast ? 1.0f : 0.0f);
                 break;
             case kDeviceStateListening:
             case kDeviceStateAudioTesting:
