@@ -165,6 +165,12 @@ private:
     float look_tx_ = 0, look_ty_ = 0;
     uint32_t next_look_ = 60, look_hold_until_ = 0;
     int bounce_t_ = -1;
+    // Pirueta al sonar el "pop": se agacha, salta girando 360 y aterriza
+    static constexpr int kSpinPrep = 3;     // agachada
+    static constexpr int kSpinAir = 15;     // salto + giro (~600 ms)
+    static constexpr int kSpinLand = 4;     // aterrizaje
+    int spin_t_ = -1;
+    uint32_t last_cue_ = 0;
     Moment moment_ = kMomNone;
     int moment_left_ = 0;
     int moment_t_ = 0;
@@ -321,8 +327,18 @@ private:
         auto state = listen_ready::EffectiveState(app.GetDeviceState());
         idle_ticks_ = (state == kDeviceStateIdle) ? idle_ticks_ + 1 : 0;
 
-        // Saltito cuando empieza a escuchar (wake word o boton)
-        if (state == kDeviceStateListening && prev_state_ != kDeviceStateListening) {
+        // Pirueta cuando suena el "pop" de "ya podes hablar"
+        uint32_t cue = app.GetListenCue();
+        if (cue != last_cue_) {
+            last_cue_ = cue;
+            spin_t_ = 0;
+            bounce_t_ = -1;
+            EndMoment();
+        }
+
+        // Saltito cuando empieza a escuchar (si no esta haciendo la pirueta)
+        if (state == kDeviceStateListening && prev_state_ != kDeviceStateListening &&
+            spin_t_ < 0) {
             bounce_t_ = 0;
             EndMoment();
         }
@@ -454,6 +470,7 @@ private:
         }
 
         if (bounce_t_ >= 0 && ++bounce_t_ > 12) bounce_t_ = -1;
+        if (spin_t_ >= 0 && ++spin_t_ >= kSpinPrep + kSpinAir + kSpinLand) spin_t_ = -1;
     }
 
     // ================= pose: a donde tiene que ir cada parte =================
@@ -727,6 +744,32 @@ private:
             if (bounce_t_ < 3)      { dh = -8; dw = 4; dy = 3; }
             else if (bounce_t_ < 7) { dh = 4;  dw = -2; dy = -3; }
             for (auto& e : tgt_) { e.h += dh; e.w += dw; e.y += dy; }
+            mdy += dy;
+        }
+
+        // Pirueta: giro sobre el eje vertical (los ojos se cruzan y se
+        // afinan como si la cabeza diera una vuelta) mientras salta
+        if (spin_t_ >= 0) {
+            const int t = spin_t_;
+            float dy = 0, c = 1.0f;
+            bool squash = false;
+            if (t < kSpinPrep) {
+                squash = true; dy = 3;
+            } else if (t < kSpinPrep + kSpinAir) {
+                float p = (t - kSpinPrep) / (float)kSpinAir;     // 0..1
+                dy = -9.0f * sinf(p * 3.1415926f);
+                c = cosf(p * 6.2831853f);
+            } else {
+                squash = true; dy = 2;
+            }
+            for (auto& e : tgt_) {
+                e.x = kCx + (e.x - kCx) * c;
+                e.w = fmaxf(2.0f, e.w * fabsf(c));
+                e.y += dy;
+                if (squash) { e.h -= 7; e.w += 3; e.y += 2; }
+            }
+            mdx *= c;
+            mw = fmaxf(2.0f, mw * fabsf(c));
             mdy += dy;
         }
 

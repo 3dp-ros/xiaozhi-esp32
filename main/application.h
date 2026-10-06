@@ -8,6 +8,7 @@
 
 #include <string>
 #include <mutex>
+#include <atomic>
 #include <deque>
 #include <memory>
 #include <functional>
@@ -119,6 +120,10 @@ public:
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
 
+    // [s3zero-sala] Cambia cada vez que suena el "pop" de "ya podes hablar"
+    // (la cara lo usa para hacer la pirueta en el mismo momento).
+    uint32_t GetListenCue() const { return listen_cue_.load(); }
+
     // [s3zero-sala] Reproduce un aviso de voz (Ogg Opus por HTTP) generado
     // por Home Assistant. El firmware solo lo acepta con el dispositivo en Idle.
     void PlayNotification(const std::string& audio_url, const std::string& text) {
@@ -162,6 +167,7 @@ private:
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    std::atomic<uint32_t> listen_cue_{0};   // [s3zero-sala] contador del "pop"
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;

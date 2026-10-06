@@ -1089,6 +1089,7 @@ void Application::StartListeningAudio() {
     if (play_popup_on_listening_) {
         play_popup_on_listening_ = false;
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+        listen_cue_.fetch_add(1);   // [s3zero-sala] pirueta de la cara
     }
 }
 
