@@ -85,6 +85,15 @@ void AudioService::Initialize(AudioCodec* codec) {
     audio_engine_ = std::make_unique<LiteAudioEngine>();
 #endif
     audio_engine_->OnOutput([this](std::vector<int16_t>&& data) {
+        {
+            // [s3zero-sala] Mientras se manda el audio guardado, el audio en
+            // vivo va detras para mantener el orden.
+            std::lock_guard<std::mutex> lock(bridge_mutex_);
+            if (bridge_flushing_) {
+                bridge_pcm_.insert(bridge_pcm_.end(), data.begin(), data.end());
+                return;
+            }
+        }
         PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(data));
     });
     audio_engine_->OnVadStateChange([this](bool speaking) {
@@ -94,6 +103,9 @@ void AudioService::Initialize(AudioCodec* codec) {
         }
     });
     audio_engine_->OnWakeWordDetected([this](const std::string& wake_word) {
+        // [s3zero-sala] No dejar de grabar: lo que se dice mientras conecta
+        // se guarda y se manda al empezar la escucha.
+        BridgeStart();
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
         if (callbacks_.on_wake_word_detected) {
             callbacks_.on_wake_word_detected(wake_word);
@@ -118,7 +130,8 @@ void AudioService::Start() {
     service_stopped_.store(false);
     xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING |
                                            AS_EVENT_AUDIO_PROCESSOR_RUNNING |
-                                           AS_EVENT_AUDIO_INPUT_STOP_REQUEST);
+                                           AS_EVENT_AUDIO_INPUT_STOP_REQUEST |
+                                           AS_EVENT_WAKE_BRIDGE_RUNNING);
 
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
@@ -242,7 +255,8 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
 void AudioService::AudioInputTask() {
     constexpr EventBits_t kAudioInputActiveBits = AS_EVENT_AUDIO_TESTING_RUNNING |
                                                   AS_EVENT_WAKE_WORD_RUNNING |
-                                                  AS_EVENT_AUDIO_PROCESSOR_RUNNING;
+                                                  AS_EVENT_AUDIO_PROCESSOR_RUNNING |
+                                                  AS_EVENT_WAKE_BRIDGE_RUNNING;
 
     while (true) {
         EventBits_t bits = xEventGroupWaitBits(
@@ -304,6 +318,21 @@ void AudioService::AudioInputTask() {
                 PushTaskToEncodeQueue(kAudioTaskTypeEncodeToTestingQueue, std::move(data));
                 continue;
             }
+        }
+
+        /* [s3zero-sala] Grabar mientras conecta (despues del wake word) */
+        if ((bits & AS_EVENT_WAKE_BRIDGE_RUNNING) &&
+            !(bits & (AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING))) {
+            std::vector<int16_t> data;
+            if (ReadAudioData(data, 16000, 160)) {
+                BridgeCapture(std::move(data));
+                continue;
+            }
+        }
+
+        /* [s3zero-sala] Mandar el audio guardado sin desbordar la cola */
+        if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
+            BridgeFlushStep();
         }
 
         /* Feed the selected audio engine */
@@ -683,6 +712,7 @@ void AudioService::EnableWakeWordDetection(bool enable) {
             }
         }
         audio_engine_->EnableWakeWordDetection(true);
+        xEventGroupClearBits(event_group_, AS_EVENT_WAKE_BRIDGE_RUNNING);
         xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
     } else {
         if (audio_engine_initialized_) {
@@ -714,8 +744,12 @@ void AudioService::EnableVoiceProcessing(bool enable) {
             return;
         }
         ResetDecoder();
-        audio_input_need_warmup_ = true;
-        {
+        if (xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_BRIDGE_RUNNING) {
+            // [s3zero-sala] El mic venia grabando sin cortes: no hace falta
+            // descartar el arranque, y lo guardado se manda primero.
+            BridgeBeginFlush();
+        } else {
+            audio_input_need_warmup_ = true;
             std::lock_guard<std::mutex> lock(input_resampler_mutex_);
             if (input_resampler_ != nullptr) {
                 esp_ae_rate_cvt_reset(input_resampler_);
@@ -728,6 +762,7 @@ void AudioService::EnableVoiceProcessing(bool enable) {
             audio_engine_->EnableVoiceProcessing(false);
         }
         xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+        BridgeReset();
     }
 }
 
@@ -878,4 +913,89 @@ bool AudioService::InitializeAudioEngine() {
     audio_engine_initialized_ = true;
     audio_engine_->EnableDeviceAec(device_aec_enabled_);
     return true;
+}
+
+// ================= [s3zero-sala] puente wake word -> escucha =================
+
+void AudioService::BridgeStart() {
+    std::lock_guard<std::mutex> lock(bridge_mutex_);
+    bridge_pcm_.clear();
+    bridge_pcm_.reserve(WAKE_BRIDGE_MAX_MS * 16);
+    bridge_read_pos_ = 0;
+    bridge_flushing_ = false;
+    xEventGroupSetBits(event_group_, AS_EVENT_WAKE_BRIDGE_RUNNING);
+}
+
+void AudioService::BridgeCapture(std::vector<int16_t>&& data) {
+    const size_t channels = codec_->input_channels();
+    std::lock_guard<std::mutex> lock(bridge_mutex_);
+    if (channels <= 1) {
+        bridge_pcm_.insert(bridge_pcm_.end(), data.begin(), data.end());
+    } else {
+        for (size_t i = 0; i < data.size(); i += channels) {
+            bridge_pcm_.push_back(data[i]);
+        }
+    }
+    // Si tarda demasiado en conectar, quedarse con lo mas reciente
+    const size_t max_samples = WAKE_BRIDGE_MAX_MS * 16;
+    if (bridge_pcm_.size() > max_samples) {
+        bridge_pcm_.erase(bridge_pcm_.begin(), bridge_pcm_.end() - max_samples);
+    }
+}
+
+void AudioService::BridgeBeginFlush() {
+    const size_t frame = OPUS_FRAME_DURATION_MS * 16;
+    std::lock_guard<std::mutex> lock(bridge_mutex_);
+    xEventGroupClearBits(event_group_, AS_EVENT_WAKE_BRIDGE_RUNNING);
+    // Alinear a frames de 60 ms recortando lo mas viejo (justo despues del
+    // wake word, menos de 60 ms). Asi el audio en vivo que se agrega detras
+    // queda alineado y no se pierde nada al terminar.
+    size_t extra = bridge_pcm_.size() % frame;
+    if (extra > 0) {
+        bridge_pcm_.erase(bridge_pcm_.begin(), bridge_pcm_.begin() + extra);
+    }
+    bridge_read_pos_ = 0;
+    bridge_flushing_ = !bridge_pcm_.empty();
+    ESP_LOGI(TAG, "Wake bridge: %u ms guardados", (unsigned)(bridge_pcm_.size() / 16));
+    if (!bridge_flushing_) {
+        bridge_pcm_.clear();
+        bridge_pcm_.shrink_to_fit();
+    }
+}
+
+void AudioService::BridgeFlushStep() {
+    const size_t frame = OPUS_FRAME_DURATION_MS * 16;
+    // Se encola con bridge_mutex_ tomado: el audio en vivo (OnOutput) no
+    // puede colarse antes de un frame guardado.
+    std::lock_guard<std::mutex> lock(bridge_mutex_);
+    while (bridge_flushing_) {
+        size_t pending = bridge_pcm_.size() - bridge_read_pos_;
+        if (pending < frame) {
+            // Termino: lo que siga llega directo desde el motor de audio.
+            bridge_flushing_ = false;
+            bridge_pcm_.clear();
+            bridge_pcm_.shrink_to_fit();
+            bridge_read_pos_ = 0;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> qlock(audio_queue_mutex_);
+            if (audio_encode_queue_.size() >= MAX_ENCODE_TASKS_IN_QUEUE) {
+                return;   // cola llena: sigue en la proxima vuelta
+            }
+        }
+        std::vector<int16_t> chunk(bridge_pcm_.begin() + bridge_read_pos_,
+                                   bridge_pcm_.begin() + bridge_read_pos_ + frame);
+        bridge_read_pos_ += frame;
+        PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(chunk));
+    }
+}
+
+void AudioService::BridgeReset() {
+    std::lock_guard<std::mutex> lock(bridge_mutex_);
+    xEventGroupClearBits(event_group_, AS_EVENT_WAKE_BRIDGE_RUNNING);
+    bridge_flushing_ = false;
+    bridge_read_pos_ = 0;
+    bridge_pcm_.clear();
+    bridge_pcm_.shrink_to_fit();
 }

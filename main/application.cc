@@ -983,10 +983,6 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     }
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
-    // [s3zero-sala] "Pop" cuando ya esta escuchando, para saber cuando hablar
-    // sin mirar la pantalla. Suena despues de habilitar la captura
-    // (StartListeningAudio), asi que tapa el warmup del microfono.
-    play_popup_on_listening_ = true;
     SetListeningMode(GetDefaultListeningMode());
 #else
     // Set flag to play popup sound after state changes to listening

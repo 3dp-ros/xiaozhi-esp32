@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -52,6 +53,10 @@
 #define AS_EVENT_WAKE_WORD_RUNNING (1 << 1)
 #define AS_EVENT_AUDIO_PROCESSOR_RUNNING (1 << 2)
 #define AS_EVENT_AUDIO_INPUT_STOP_REQUEST (1 << 4)
+// [s3zero-sala] Sigue grabando entre el wake word y el inicio de la escucha
+#define AS_EVENT_WAKE_BRIDGE_RUNNING (1 << 5)
+// Maximo de audio guardado mientras conecta (16 kHz mono)
+#define WAKE_BRIDGE_MAX_MS 5000
 
 #define AS_OPUS_GET_FRAME_DRU_ENUM(duration_ms)                  \
     ((duration_ms) == 5     ? ESP_OPUS_ENC_FRAME_DURATION_5_MS   \
@@ -206,6 +211,20 @@ private:
 #endif
     std::atomic<bool> service_stopped_{true};
     std::atomic<bool> audio_input_need_warmup_{false};
+
+    // [s3zero-sala] Puente de audio wake word -> escucha.
+    // bridge_pcm_ guarda lo que se dice mientras conecta; cuando arranca la
+    // escucha se manda primero eso y despues el audio en vivo (que se encola
+    // detras mientras bridge_flushing_ esta activo), sin perder ni desordenar.
+    std::mutex bridge_mutex_;
+    std::vector<int16_t> bridge_pcm_;
+    size_t bridge_read_pos_ = 0;
+    bool bridge_flushing_ = false;
+    void BridgeStart();
+    void BridgeCapture(std::vector<int16_t>&& data);
+    void BridgeBeginFlush();
+    void BridgeFlushStep();
+    void BridgeReset();
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
