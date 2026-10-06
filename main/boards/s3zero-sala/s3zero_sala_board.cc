@@ -10,6 +10,7 @@
 #include "ha_bridge.h"
 #include "mic_gain.h"
 #include "kira_controls.h"
+#include "diag_led.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -179,6 +180,7 @@ public:
         InitializeButtons();
         InitializeTools();
         HaBridge::Instance().Start();
+        static DiagLed diag_led(DIAG_LED_GPIO);
     }
 
     // Siempre enchufado: el WiFi nunca entra en ahorro de energia.

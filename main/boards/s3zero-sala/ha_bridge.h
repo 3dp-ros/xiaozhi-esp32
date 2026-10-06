@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <string>
 
 class HaBridge {
@@ -54,6 +55,9 @@ public:
                     "ha_bridge", 6144, this, 2, nullptr);
     }
 
+    // Conexion MQTT con Home Assistant (para el LED de diagnostico)
+    bool IsConnected() const { return mqtt_ok_.load(); }
+
     // Llamado por la pantalla cuando cambia la emocion
     void OnEmotion(const char* emotion) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -68,6 +72,7 @@ private:
     std::mutex mutex_;
     bool started_ = false;
     bool resend_all_ = true;
+    std::atomic<bool> mqtt_ok_{false};
 
     std::string emotion_ = "neutral";
     std::string pending_url_;
@@ -314,7 +319,8 @@ private:
         mqtt_->OnMessage([this](const std::string& t, const std::string& p) { OnMessage(t, p); });
 
         while (true) {
-            if (!mqtt_->IsConnected()) {
+            mqtt_ok_ = mqtt_->IsConnected();
+            if (!mqtt_ok_) {
                 auto result = mqtt_->Connect(HA_MQTT_HOST, HA_MQTT_PORT, "kira_sala",
                                              HA_MQTT_USER, HA_MQTT_PASS);
                 if (!result) {

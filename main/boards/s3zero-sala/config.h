@@ -26,6 +26,9 @@
 #define BUILTIN_LED_GPIO        GPIO_NUM_8
 #define LED_MAX_BRIGHTNESS      120   // 0-255
 
+// LED RGB de la placa (WS2812 interno), usado para diagnostico
+#define DIAG_LED_GPIO           GPIO_NUM_21
+
 // Boton BOOT de la placa (click: hablar / cortar; al arrancar: modo WiFi)
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 
