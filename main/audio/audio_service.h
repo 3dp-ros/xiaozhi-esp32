@@ -220,8 +220,8 @@ private:
     std::vector<int16_t> bridge_pcm_;
     size_t bridge_read_pos_ = 0;
     bool bridge_flushing_ = false;
+    bool bridge_capturing_ = false;
     void BridgeStart();
-    void BridgeCapture(std::vector<int16_t>&& data);
     void BridgeBeginFlush();
     void BridgeFlushStep();
     void BridgeReset();
