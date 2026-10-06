@@ -71,6 +71,7 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+    float GetOutputLevel() const { return audio_service_.GetOutputLevel(); }   // [s3zero-sala]
     
     /**
      * Request state transition

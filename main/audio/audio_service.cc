@@ -1,5 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
@@ -380,7 +382,31 @@ void AudioService::AudioOutputTask() {
             callbacks_.on_playback_progress(task.playback_id, task.media_position_ms);
         }
 
+        // [s3zero-sala] Envolvente del bloque, en tramos de 20 ms
+        std::vector<float> levels;
+        {
+            const int ch = codec_->output_channels() > 0 ? codec_->output_channels() : 1;
+            const size_t step = (size_t)codec_->output_sample_rate() / 50 * ch;
+            for (size_t i = 0; step > 0 && i < task.pcm.size(); i += step) {
+                size_t n = std::min(step, task.pcm.size() - i);
+                double acc = 0;
+                for (size_t j = 0; j < n; j++) {
+                    double v = task.pcm[i + j];
+                    acc += v * v;
+                }
+                float rms = (float)sqrt(acc / n);
+                levels.push_back(std::min(1.0f, rms / 6000.0f));
+            }
+        }
+
         codec_->OutputData(task.pcm);
+
+        {
+            // Al volver de OutputData el bloque entro al DMA y empieza a sonar
+            std::lock_guard<std::mutex> lv(out_level_mutex_);
+            out_levels_ = std::move(levels);
+            out_levels_start_us_ = esp_timer_get_time();
+        }
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -1002,4 +1028,16 @@ void AudioService::BridgeReset() {
     bridge_read_pos_ = 0;
     bridge_pcm_.clear();
     bridge_pcm_.shrink_to_fit();
+}
+
+float AudioService::GetOutputLevel() const {
+    std::lock_guard<std::mutex> lock(out_level_mutex_);
+    if (out_levels_.empty()) {
+        return 0.0f;
+    }
+    int64_t idx = (esp_timer_get_time() - out_levels_start_us_) / kOutLevelStepUs;
+    if (idx < 0 || idx >= (int64_t)out_levels_.size()) {
+        return 0.0f;
+    }
+    return out_levels_[idx];
 }

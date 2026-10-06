@@ -178,6 +178,7 @@ private:
     int last_pir_ = 0;
     int talk_left_ = 0;
     float talk_h_ = 4;
+    float voice_lvl_ = 0;     // nivel suavizado del audio que suena (0-1)
     float fly_x_ = 0, fly_y_ = 0;       // mosca (momento)
     float star_x_ = 0, star_y_ = 0;     // estrella fugaz (momento)
 
@@ -475,7 +476,6 @@ private:
     // ================= pose: a donde tiene que ir cada parte =================
     void Pose(DeviceState state) {
         bool listening = state == kDeviceStateListening;
-        bool speaking = state == kDeviceStateSpeaking || state == kDeviceStateNotifying;
         bool asleep = state == kDeviceStateIdle && idle_ticks_ > 4500;   // 3 min sin uso
         const int et = (int)emo_t_;
 
@@ -704,8 +704,13 @@ private:
         if (want_[0] == kGlasses) target_drop = 1;
         glasses_drop_ = Approach(glasses_drop_, target_drop, 0.3f);
 
-        // Hablando: la boca se mueve
-        if (speaking && talk_ok) {
+        // Hablando: la boca sigue el volumen de lo que realmente suena por el
+        // parlante (no el estado), asi no se adelanta ni se corta antes.
+        float lvl = Application::GetInstance().GetOutputLevel();
+        voice_lvl_ = Approach(voice_lvl_, lvl, lvl > voice_lvl_ ? 0.7f : 0.45f);
+        bool voice_out = voice_lvl_ > 0.04f;
+        talk_h_ = 1.0f + voice_lvl_ * 9.0f;
+        if (voice_out && talk_ok) {
             if (mk == kMTeeth || mk == kMTrap) {
                 mh = 3 + talk_h_ * 0.6f;
             } else {

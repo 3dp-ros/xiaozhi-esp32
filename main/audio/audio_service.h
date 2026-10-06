@@ -128,6 +128,9 @@ public:
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
     const std::string& GetLastWakeWord() const;
     bool IsVoiceDetected() const { return voice_detected_; }
+    // [s3zero-sala] Nivel (0-1) del audio que esta saliendo por el parlante
+    // en este momento, para sincronizar la boca de la cara con la voz.
+    float GetOutputLevel() const;
     bool IsIdle();
     bool IsPlaybackIdle();
     bool IsWakeWordRunning() const {
@@ -221,6 +224,12 @@ private:
     size_t bridge_read_pos_ = 0;
     bool bridge_flushing_ = false;
     bool bridge_capturing_ = false;
+
+    // [s3zero-sala] Envolvente del ultimo bloque reproducido (de a 20 ms)
+    static constexpr int kOutLevelStepUs = 20000;
+    mutable std::mutex out_level_mutex_;
+    std::vector<float> out_levels_;
+    int64_t out_levels_start_us_ = 0;
     void BridgeStart();
     void BridgeBeginFlush();
     void BridgeFlushStep();
