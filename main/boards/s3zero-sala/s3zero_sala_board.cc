@@ -23,13 +23,17 @@
 
 #define TAG "S3ZeroSalaBoard"
 
-// INMP441 con procesamiento de entrada:
-//  1) Filtro pasa-altos (~80 Hz): saca la continua del INMP441 y el zumbido
-//     grave, que al amplificarse saturaban el audio.
-//  2) Ganancia ajustable desde Home Assistant (Sensibilidad microfono).
-//  3) Limitador suave: los picos se redondean en vez de cortarse de golpe,
-//     asi la voz no suena "rota" aunque se hable fuerte o cerca.
-//  4) Silencio total si el microfono esta silenciado desde Home Assistant.
+// INMP441 con procesamiento de entrada (16 kHz):
+//  1) Pasa-altos de 2do orden (~120 Hz): saca la continua del INMP441 y el
+//     exceso de graves (voces graves saturaban antes que las agudas).
+//  2) Pasa-bajos eliptico (corte 4,8 kHz, -55 dB desde 5,5 kHz): elimina el
+//     pitido de ~7 kHz (interferencia electrica) sin tocar la voz (< 4 kHz).
+//  3) Ganancia ajustable desde Home Assistant (Sensibilidad microfono).
+//  4) Control automatico de nivel: si la voz llega muy fuerte baja la
+//     ganancia sola (ataque rapido, liberacion lenta), asi no satura aunque
+//     la sensibilidad este alta o se hable cerca.
+//  5) Limitador suave de respaldo para picos sueltos.
+//  6) Silencio total si el microfono esta silenciado desde Home Assistant.
 class BoostedMicCodec : public NoAudioCodecSimplex {
 public:
     using NoAudioCodecSimplex::NoAudioCodecSimplex;
@@ -42,17 +46,22 @@ protected:
             return n;
         }
         const float gain = (float)mic_gain::Get();
-        constexpr float kR = 0.969f;          // pasa-altos de 1er orden, ~80 Hz a 16 kHz
-        constexpr float kKnee = 16000.0f;     // a partir de aca empieza a comprimir
+        constexpr float kTarget = 10000.0f;   // pico maximo deseado
+        constexpr float kAttack = 0.02f;      // ~3 ms
+        constexpr float kRelease = 0.0002f;   // ~300 ms
+        constexpr float kKnee = 16000.0f;
         constexpr float kMax = 32000.0f;
         constexpr float kRange = kMax - kKnee;
         for (int i = 0; i < n; i++) {
-            float x = (float)dest[i];
-            float y = x - hp_x_ + kR * hp_y_;
-            hp_x_ = x;
-            hp_y_ = y;
-            float v = y * gain;
+            float v = hp_.Process((float)dest[i]);
+            for (auto& s : lp_) v = s.Process(v);
+            v *= gain;
+
             float a = fabsf(v);
+            env_ += (a > env_ ? kAttack : kRelease) * (a - env_);
+            if (env_ > kTarget) v *= kTarget / env_;
+
+            a = fabsf(v);
             if (a > kKnee) {
                 float over = (a - kKnee) / kRange;
                 a = kKnee + kRange * tanhf(over);
@@ -64,8 +73,26 @@ protected:
     }
 
 private:
-    float hp_x_ = 0.0f;
-    float hp_y_ = 0.0f;
+    // Biquad en forma directa II transpuesta
+    struct Biquad {
+        float b0, b1, b2, a1, a2;
+        float z1 = 0.0f, z2 = 0.0f;
+        float Process(float x) {
+            float y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2;
+            z2 = b2 * x - a2 * y;
+            return y;
+        }
+    };
+    // Butterworth 2do orden, 120 Hz @ 16 kHz
+    Biquad hp_{0.96722728f, -1.93445457f, 0.96722728f, -1.93338023f, 0.9355289f};
+    // Eliptico 6to orden, 4,8 kHz @ 16 kHz (0,5 dB ripple, 55 dB rechazo)
+    Biquad lp_[3] = {
+        {0.08324422f, 0.15684002f, 0.08324422f, -0.45987479f, 0.20966396f},
+        {1.0f, 1.37536923f, 1.0f, 0.24528041f, 0.64996963f},
+        {1.0f, 1.0962251f, 1.0f, 0.60636534f, 0.91242537f},
+    };
+    float env_ = 0.0f;
 };
 
 class S3ZeroSalaBoard : public WifiBoard {
