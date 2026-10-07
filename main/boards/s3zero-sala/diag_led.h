@@ -7,7 +7,8 @@
 //   Azul parpadeando lento   -> modo configuracion WiFi
 //   Rojo parpadeando         -> sin WiFi
 //   Amarillo fijo            -> WiFi OK, sin conexion MQTT con Home Assistant
-//   Verde tenue              -> todo OK, buena senal WiFi
+//   Apagado                  -> todo OK (antes quedaba verde fijo y se veia
+//                               a traves de la carcasa)
 //   Naranja tenue            -> todo OK, pero senal WiFi debil (< -75 dBm)
 //   Rojo fijo                -> error grave del firmware
 //   Destello blanco          -> detecto el wake word / empezo una charla
@@ -97,7 +98,7 @@ private:
         } else if (wifi.GetRssi() < kWeakRssi) {
             Show(1, 0.35f, 0);
         } else {
-            Show(0, 1, 0);
+            Show(0, 0, 0);   // todo OK: apagado
         }
     }
 };
