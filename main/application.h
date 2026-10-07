@@ -91,6 +91,7 @@ public:
     void DismissAlert();
 
     void AbortSpeaking(AbortReason reason);
+    void CloseChat();   // [s3zero-sala] cierra la charla y vuelve al reposo
 
     /**
      * Toggle chat state (event-based, thread-safe)

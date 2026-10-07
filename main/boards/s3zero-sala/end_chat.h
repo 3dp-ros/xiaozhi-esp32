@@ -5,9 +5,11 @@
 // ("chau", "gracias", "listo"), el modelo la llama y Kira cierra la charla
 // apenas termina de decir su ultima frase, en vez de quedarse escuchando.
 //
-// El cierre se hace desde un esp_timer: espera a que Kira deje de hablar
-// (estado escuchando) y ahi hace ToggleChatState(), que en ese estado cierra
-// el canal de audio y vuelve al reposo. Si en 20 s no pasa, se cancela.
+// Un esp_timer revisa cada 100 ms: cuando ya no queda audio por reproducir
+// (Kira termino de hablar) espera 0,6 s mas y cierra la charla con
+// Application::CloseChat(), sin depender de que el servidor mande el fin del
+// habla (a veces no lo manda y Kira quedaba trabado en "hablando").
+// Si en 20 s no pasa, se cancela.
 
 #include "application.h"
 #include "mcp_server.h"
@@ -20,22 +22,36 @@ namespace end_chat {
 
 inline std::atomic<bool> pending{false};
 inline std::atomic<int64_t> requested_us{0};
+inline int64_t quiet_since_us = 0;
+inline bool saw_audio = false;      // ya empezo a decir la despedida
 inline esp_timer_handle_t timer = nullptr;
 
 inline void Check() {
     if (!pending.load()) return;
     auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
-    int64_t elapsed = esp_timer_get_time() - requested_us.load();
+    int64_t now = esp_timer_get_time();
+    int64_t elapsed = now - requested_us.load();
     if (state == kDeviceStateIdle || elapsed > 20 * 1000 * 1000) {
         pending = false;    // ya termino solo o se vencio
         return;
     }
-    // Cerrar cuando termino de hablar (paso a escuchar), con 300 ms de margen
-    if (state == kDeviceStateListening && elapsed > 300 * 1000) {
+    bool quiet = state == kDeviceStateListening ||
+                 (state == kDeviceStateSpeaking && app.GetAudioService().IsPlaybackIdle());
+    if (!quiet) {
+        if (state == kDeviceStateSpeaking) saw_audio = true;
+        quiet_since_us = 0;
+        return;
+    }
+    if (quiet_since_us == 0) quiet_since_us = now;
+    // Cerrar 0,6 s despues de terminar la despedida. Si la herramienta llego
+    // antes de que empiece a hablar, esperar hasta 3 s de silencio total.
+    int64_t need = saw_audio ? 600 * 1000 : 3000 * 1000;
+    if (now - quiet_since_us > need) {
         pending = false;
+        quiet_since_us = 0;
         ESP_LOGI("EndChat", "Fin de la charla pedido por el modelo");
-        app.ToggleChatState();
+        app.CloseChat();
     }
 }
 
@@ -57,6 +73,8 @@ inline void Register() {
         PropertyList(),
         [](const PropertyList& properties) -> ReturnValue {
             requested_us = esp_timer_get_time();
+            quiet_since_us = 0;
+            saw_audio = false;
             pending = true;
             return "{\"ok\": true}";
         });

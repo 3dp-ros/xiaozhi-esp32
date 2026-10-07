@@ -1185,6 +1185,19 @@ void Application::AbortSpeaking(AbortReason reason) {
     }
 }
 
+// [s3zero-sala] Cierra la charla desde la placa (herramienta self.chat.end):
+// cierra el canal de audio y vuelve al reposo, sin esperar al servidor.
+void Application::CloseChat() {
+    Schedule([this]() {
+        if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        } else if (GetDeviceState() == kDeviceStateSpeaking ||
+                   GetDeviceState() == kDeviceStateListening) {
+            SetDeviceState(kDeviceStateIdle);
+        }
+    });
+}
+
 void Application::SetListeningMode(ListeningMode mode) {
     listening_mode_ = mode;
     SetDeviceState(kDeviceStateListening);
