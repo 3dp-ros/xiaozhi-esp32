@@ -11,6 +11,7 @@
 #include "mic_gain.h"
 #include "kira_controls.h"
 #include "diag_led.h"
+#include "end_chat.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -169,6 +170,7 @@ private:
             [](const PropertyList& properties) -> ReturnValue {
                 return gpio_get_level(PIR_GPIO) ? "{\"motion\": true}" : "{\"motion\": false}";
             });
+        end_chat::Register();
     }
 
 public:
