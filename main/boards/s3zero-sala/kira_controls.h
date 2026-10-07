@@ -8,8 +8,11 @@
 //                    Se reactiva desde Home Assistant.
 //   - Modo noche:    pantalla al minimo y LED apagado (sigue funcionando).
 //   - Brillo:        brillo de la pantalla (1-100 %).
+//   - Sensibilidad wake word: 0 = original del modelo, 1 a 10 = cada vez
+//                    mas facil de despertar (y mas riesgo de que se active solo).
 
 #include "settings.h"
+#include "wake_threshold.h"
 
 #include <atomic>
 
@@ -28,12 +31,14 @@ public:
         mute_ = s.GetBool("mute", false);
         night_ = s.GetBool("night", false);
         brightness_ = Clamp(s.GetInt("bright", 100), 1, 100);
+        wake_threshold::Set(s.GetInt("ww_level", 0));
     }
 
     bool Sleep() const { return sleep_.load(); }
     bool Mute() const { return mute_.load(); }
     bool Night() const { return night_.load(); }
     int Brightness() const { return brightness_.load(); }
+    int WakeLevel() const { return wake_threshold::Get(); }
 
     // El microfono solo se corta si esta silenciado (durmiendo sigue
     // escuchando el wake word para poder despertarlo con la voz)
@@ -47,6 +52,12 @@ public:
         brightness_ = v;
         Settings s("kira", true);
         s.SetInt("bright", v);
+    }
+
+    void SetWakeLevel(int v) {
+        wake_threshold::Set(v);
+        Settings s("kira", true);
+        s.SetInt("ww_level", wake_threshold::Get());
     }
 
     // Contraste efectivo para la OLED (0-255)

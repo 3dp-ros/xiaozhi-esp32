@@ -12,6 +12,7 @@
 
 #include "audio_service.h"
 #include "wake_words/custom_wake_word.h"
+#include "wake_threshold.h"
 
 #define TAG "AfeAudioEngine"
 
@@ -204,6 +205,7 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
         afe_iface_->disable_aec(afe_data_);
     }
     afe_iface_->print_pipeline(afe_data_);
+    wake_threshold::dirty = true;   // reaplicar la sensibilidad elegida
 
     if (processing_task_stack_ == nullptr) {
         processing_task_stack_ = static_cast<StackType_t*>(
@@ -417,6 +419,21 @@ void AfeAudioEngine::ProcessingTask() {
             // WakeNet/AEC toggles are not safe against a concurrent fetch,
             // so they are applied here, in the task that owns the fetch side.
             ApplyAfeControls();
+        }
+        if (wake_threshold::dirty.exchange(false) && wake_detector_ == WakeDetector::kWakeNet &&
+            afe_iface_ != nullptr && afe_data_ != nullptr) {
+            // Sensibilidad del wake word pedida desde la placa (0 = original)
+            int level = wake_threshold::Get();
+            if (level <= 0) {
+                if (afe_iface_->reset_wakenet_threshold) {
+                    afe_iface_->reset_wakenet_threshold(afe_data_, 1);
+                }
+                ESP_LOGI(TAG, "Wake word threshold: model default");
+            } else if (afe_iface_->set_wakenet_threshold) {
+                float th = wake_threshold::Threshold(level);
+                afe_iface_->set_wakenet_threshold(afe_data_, 1, th);
+                ESP_LOGI(TAG, "Wake word threshold: level %d -> %.2f", level, th);
+            }
         }
         const uint32_t generation = control_generation_.load();
         auto* result = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);

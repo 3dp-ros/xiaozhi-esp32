@@ -10,6 +10,7 @@
 //   number         Volumen      (0-100)
 //   number         Sensibilidad microfono (1-12, se guarda en la placa)
 //   number         Brillo pantalla (1-100 %)
+//   number         Sensibilidad wake word (0 = original, 1-10 mas sensible)
 //   switch         Modo dormir  (pantalla/LED apagados; "Ey Kira" lo despierta)
 //   switch         Silenciar microfono (no escucha nada; se reactiva desde HA)
 //   switch         Modo noche   (pantalla al minimo, LED apagado)
@@ -85,6 +86,7 @@ private:
     int last_volume_ = -1;
     int last_mic_gain_ = -1;
     int last_bright_ = -1;
+    int last_wake_ = -1;
     int last_sleep_ = -1, last_mute_ = -1, last_night_ = -1;
     int rssi_ticks_ = 0;
 
@@ -118,6 +120,10 @@ private:
             "\"name\":\"Brillo pantalla\",\"icon\":\"mdi:brightness-6\",\"min\":1,\"max\":100,\"step\":1,"
             "\"unit_of_measurement\":\"%\",\"mode\":\"slider\",\"entity_category\":\"config\","
             "\"state_topic\":\"" + T("brillo") + "\",\"command_topic\":\"" + T("brillo/set") + "\"");
+        pub("number", "wakeword",
+            "\"name\":\"Sensibilidad wake word\",\"icon\":\"mdi:ear-hearing\",\"min\":0,\"max\":10,\"step\":1,"
+            "\"mode\":\"slider\",\"entity_category\":\"config\","
+            "\"state_topic\":\"" + T("wakeword") + "\",\"command_topic\":\"" + T("wakeword/set") + "\"");
         auto sw = [&](const char* obj, const char* name, const char* icon) {
             pub("switch", obj,
                 std::string("\"name\":\"") + name + "\",\"icon\":\"" + icon + "\","
@@ -143,6 +149,7 @@ private:
         mqtt_->Subscribe(T("volumen/set"), 1);
         mqtt_->Subscribe(T("microfono/set"), 1);
         mqtt_->Subscribe(T("brillo/set"), 1);
+        mqtt_->Subscribe(T("wakeword/set"), 1);
         mqtt_->Subscribe(T("dormir/set"), 1);
         mqtt_->Subscribe(T("silencio/set"), 1);
         mqtt_->Subscribe(T("noche/set"), 1);
@@ -189,6 +196,9 @@ private:
             ESP_LOGI(kTag, "Sensibilidad de microfono: %d", mic_gain::Get());
         } else if (topic == T("brillo/set")) {
             kira::Controls::Get().SetBrightness(atoi(payload.c_str()));
+        } else if (topic == T("wakeword/set")) {
+            kira::Controls::Get().SetWakeLevel(atoi(payload.c_str()));
+            ESP_LOGI(kTag, "Sensibilidad wake word: %d", kira::Controls::Get().WakeLevel());
         } else if (topic == T("dormir/set")) {
             kira::Controls::Get().SetSleep(payload == "ON");
         } else if (topic == T("silencio/set")) {
@@ -262,6 +272,10 @@ private:
         int bright = ctl.Brightness();
         if (all || bright != last_bright_) {
             if (mqtt_->Publish(T("brillo"), std::to_string(bright))) last_bright_ = bright;
+        }
+        int wake = ctl.WakeLevel();
+        if (all || wake != last_wake_) {
+            if (mqtt_->Publish(T("wakeword"), std::to_string(wake))) last_wake_ = wake;
         }
         // Senal WiFi: cada ~30 s
         if (all || ++rssi_ticks_ >= 150) {
