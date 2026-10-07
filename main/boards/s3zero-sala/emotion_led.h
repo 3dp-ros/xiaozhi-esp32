@@ -16,6 +16,8 @@
 
 #include <led_strip.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <esp_log.h>
 #include <cmath>
 #include <cstring>
@@ -37,15 +39,16 @@ public:
         ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &strip_));
         led_strip_clear(strip_);
 
-        esp_timer_create_args_t args = {
-            .callback = [](void* arg) { static_cast<EmotionLed*>(arg)->Tick(); },
-            .arg = this,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "emotion_led",
-            .skip_unhandled_events = true,
-        };
-        ESP_ERROR_CHECK(esp_timer_create(&args, &timer_));
-        ESP_ERROR_CHECK(esp_timer_start_periodic(timer_, 30 * 1000));
+        // Tarea propia (antes era un esp_timer): si otro temporizador del
+        // sistema se demora, el LED no se congela en el ultimo color.
+        xTaskCreate([](void* arg) {
+            auto* self = static_cast<EmotionLed*>(arg);
+            TickType_t last = xTaskGetTickCount();
+            while (true) {
+                self->Tick();
+                xTaskDelayUntil(&last, pdMS_TO_TICKS(30));
+            }
+        }, "emotion_led", 3072, this, 3, nullptr);
     }
 
     static EmotionLed* instance;
@@ -89,6 +92,7 @@ private:
     float emo_r_ = 0.0f, emo_g_ = 1.0f, emo_b_ = 0.0f;
     uint32_t tick_ = 0;
     uint8_t last_r_ = 255, last_g_ = 255, last_b_ = 255;
+    uint32_t last_send_ = 0;
     std::atomic<int64_t> rainbow_start_{0};
     std::atomic<int64_t> rainbow_end_{0};
 
@@ -130,16 +134,16 @@ private:
         uint8_t R = (uint8_t)(clamp(r * level) * LED_MAX_BRIGHTNESS);
         uint8_t G = (uint8_t)(clamp(g * level) * LED_MAX_BRIGHTNESS);
         uint8_t B = (uint8_t)(clamp(b * level) * LED_MAX_BRIGHTNESS);
-        if (R == last_r_ && G == last_g_ && B == last_b_) {
+        // Si el color no cambio igual se reenvia cada ~1 s: si un envio se
+        // pierde (por ejemplo el de "apagado" al terminar la charla), el LED
+        // ya no queda trabado en el ultimo color.
+        if (R == last_r_ && G == last_g_ && B == last_b_ && tick_ - last_send_ < 33) {
             return;
         }
         last_r_ = R; last_g_ = G; last_b_ = B;
-        if (R == 0 && G == 0 && B == 0) {
-            led_strip_clear(strip_);
-        } else {
-            led_strip_set_pixel(strip_, 0, R, G, B);
-            led_strip_refresh(strip_);
-        }
+        last_send_ = tick_;
+        led_strip_set_pixel(strip_, 0, R, G, B);
+        led_strip_refresh(strip_);
     }
 
     void Tick() {
