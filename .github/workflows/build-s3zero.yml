@@ -29,6 +29,8 @@ jobs:
             --language es-ES \
             --wake-word wn9_heykira_tts3
           cp build/merged-binary.bin out/xiaozhi-kira.bin
+          cp build/xiaozhi.bin out/xiaozhi-kira-ota.bin 2>/dev/null || true
+          echo "::notice::app=$(stat -c %s build/xiaozhi.bin 2>/dev/null) bytes; assets=$(stat -c %s build/generated_assets.bin 2>/dev/null || echo ?) bytes"
 
           ls -l out
 
