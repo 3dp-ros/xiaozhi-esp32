@@ -152,6 +152,9 @@ public:
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    // [s3zero-sala] Silencia el microfono durante ms (para no mandar al
+    // servidor el sonido de aviso que esta saliendo por el parlante)
+    void SuppressInput(int ms);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
@@ -224,6 +227,7 @@ private:
     size_t bridge_read_pos_ = 0;
     bool bridge_flushing_ = false;
     bool bridge_capturing_ = false;
+    std::atomic<int64_t> input_suppress_until_us_{0};
 
     // [s3zero-sala] Envolvente del ultimo bloque reproducido (de a 20 ms)
     static constexpr int kOutLevelStepUs = 20000;

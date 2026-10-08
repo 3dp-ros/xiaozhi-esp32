@@ -251,6 +251,11 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
         }
     }
 
+    // [s3zero-sala] Microfono silenciado mientras suena el aviso
+    if (esp_timer_get_time() < input_suppress_until_us_.load()) {
+        std::fill(data.begin(), data.end(), 0);
+    }
+
     /* Update the last input time */
     last_input_time_ = std::chrono::steady_clock::now();
     debug_statistics_.input_count++;
@@ -1040,4 +1045,8 @@ float AudioService::GetOutputLevel() const {
         return 0.0f;
     }
     return out_levels_[idx];
+}
+
+void AudioService::SuppressInput(int ms) {
+    input_suppress_until_us_ = esp_timer_get_time() + (int64_t)ms * 1000;
 }
