@@ -181,22 +181,6 @@ private:
     }
 
     void InitializeTools() {
-        gpio_config_t pir_config = {
-            .pin_bit_mask = (1ULL << PIR_GPIO),
-            .mode = GPIO_MODE_INPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_ENABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        ESP_ERROR_CHECK(gpio_config(&pir_config));
-
-        auto& mcp_server = McpServer::GetInstance();
-        mcp_server.AddTool("self.sala.get_motion",
-            "Indica si el sensor de movimiento del living detecta a alguien en este momento",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                return gpio_get_level(PIR_GPIO) ? "{\"motion\": true}" : "{\"motion\": false}";
-            });
         end_chat::Register();
     }
 

@@ -4,7 +4,6 @@
 // Puente MQTT con Home Assistant (autodescubrimiento).
 //
 // Entidades que aparecen en HA (dispositivo "Kira Sala"):
-//   binary_sensor  Movimiento   (PIR)
 //   sensor         Estado       (reposo, escuchando, hablando...)
 //   sensor         Emocion      (ultima emocion de Kira)
 //   number         Volumen      (0-100)
@@ -82,7 +81,6 @@ private:
 
     std::string last_state_;
     std::string last_emotion_;
-    int last_motion_ = -1;
     int last_volume_ = -1;
     int last_mic_gain_ = -1;
     int last_bright_ = -1;
@@ -103,8 +101,9 @@ private:
             std::string payload = "{" + body + ",\"unique_id\":\"kira_sala_" + obj + "\"," + Device() + "}";
             mqtt_->Publish(topic, payload, 1);
         };
-        pub("binary_sensor", "movimiento",
-            "\"name\":\"Movimiento\",\"device_class\":\"motion\",\"state_topic\":\"" + T("movimiento") + "\"");
+        // El sensor de movimiento (PIR) se saco: un config vacio borra la
+        // entidad "Movimiento" que habia quedado en Home Assistant
+        mqtt_->Publish("homeassistant/binary_sensor/kira_sala/movimiento/config", "", 1);
         pub("sensor", "estado",
             "\"name\":\"Estado\",\"icon\":\"mdi:robot\",\"state_topic\":\"" + T("estado") + "\"");
         pub("sensor", "emocion",
@@ -248,10 +247,6 @@ private:
         std::string state = StateName(app.GetDeviceState());
         if (all || state != last_state_) {
             if (mqtt_->Publish(T("estado"), state)) last_state_ = state;
-        }
-        int motion = gpio_get_level(PIR_GPIO);
-        if (all || motion != last_motion_) {
-            if (mqtt_->Publish(T("movimiento"), motion ? "ON" : "OFF")) last_motion_ = motion;
         }
         if (all || emotion != last_emotion_) {
             if (mqtt_->Publish(T("emocion"), emotion)) last_emotion_ = emotion;

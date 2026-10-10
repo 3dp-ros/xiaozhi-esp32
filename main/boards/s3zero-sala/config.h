@@ -32,9 +32,6 @@
 // Boton BOOT de la placa (click: hablar / cortar; al arrancar: modo WiFi)
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 
-// PIR HC-SR501 (expuesto como herramienta MCP y sensor en Home Assistant)
-#define PIR_GPIO                GPIO_NUM_11
-
 // OLED SH1106 128x64 por I2C
 #define DISPLAY_SDA_PIN GPIO_NUM_10
 #define DISPLAY_SCL_PIN GPIO_NUM_9

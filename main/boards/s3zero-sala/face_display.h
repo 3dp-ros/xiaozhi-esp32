@@ -175,7 +175,6 @@ private:
     int moment_t_ = 0;
     uint32_t next_moment_ = 300;
     uint32_t next_twinkle_ = 80;
-    int last_pir_ = 0;
     int talk_left_ = 0;
     float talk_h_ = 4;
     float voice_lvl_ = 0;     // nivel suavizado del audio que suena (0-1)
@@ -350,20 +349,6 @@ private:
             ClearParticles();
         }
         prev_state_ = state;
-
-        // Sensor de movimiento: te mira y se pone contento
-        int pir = gpio_get_level(PIR_GPIO);
-        if (pir && !last_pir_ && state == kDeviceStateIdle) {
-            idle_ticks_ = 0;
-            if (emotion_ == kNeutral) {
-                StartMoment(kMomCat, 45);
-                bounce_t_ = 0;
-            }
-            look_tx_ = Rand(2) ? 8 : -8;
-            look_ty_ = 0;
-            look_hold_until_ = tick_ + 25;
-        }
-        last_pir_ = pir;
 
         UpdateTimers(state);
         ApplyMode();
