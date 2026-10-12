@@ -87,6 +87,7 @@ public:
         HaBridge::Instance().OnEmotion(emotion);
         DisplayLockGuard lock(this);
         Emotion e = Parse(emotion);
+        idle_ticks_ = 0;   // una emocion nueva (charla o Home Assistant) lo despierta
         if (e != emotion_) {
             emotion_ = e;
             emo_t_ = 0;
@@ -118,6 +119,10 @@ private:
     static constexpr int kW = 128;
     static constexpr int kH = 64;
     static constexpr int kTickMs = 40;          // 25 cuadros por segundo
+    // Cara de dormido (zzz) recien despues de 4 h en reposo sin uso
+    static constexpr uint32_t kSleepTicks = 4u * 3600u * 1000u / kTickMs;
+    // Emocion puesta desde Home Assistant en reposo: cuanto dura (20 s)
+    static constexpr uint32_t kEmotionHoldTicks = 20u * 1000u / kTickMs;
     // La cara se disena en "unidades" y se agranda al dibujar (kS) para
     // ocupar mas pantalla, dejando los costados y arriba para los detalles
     static constexpr float kS = 1.25f;
@@ -347,6 +352,16 @@ private:
             emotion_ = kNeutral;
             emo_t_ = 0;
             ClearParticles();
+            HaBridge::Instance().OnEmotion("neutral");
+        }
+        // Emocion puesta desde Home Assistant estando en reposo: se muestra un
+        // rato y vuelve sola a neutral
+        if (state == kDeviceStateIdle && prev_state_ == kDeviceStateIdle &&
+            emotion_ != kNeutral && emo_t_ > kEmotionHoldTicks) {
+            emotion_ = kNeutral;
+            emo_t_ = 0;
+            ClearParticles();
+            HaBridge::Instance().OnEmotion("neutral");
         }
         prev_state_ = state;
 
@@ -377,7 +392,7 @@ private:
         if (moment_left_ > 0) {
             moment_t_++;
             if (--moment_left_ == 0) EndMoment();
-        } else if (state == kDeviceStateIdle && idle_ticks_ < 4500 &&
+        } else if (state == kDeviceStateIdle && idle_ticks_ < kSleepTicks &&
                    emotion_ == kNeutral && tick_ >= next_moment_) {
             int r = Rand(14);
             if (r < 2) {
@@ -461,7 +476,7 @@ private:
     // ================= pose: a donde tiene que ir cada parte =================
     void Pose(DeviceState state) {
         bool listening = state == kDeviceStateListening;
-        bool asleep = state == kDeviceStateIdle && idle_ticks_ > 4500;   // 3 min sin uso
+        bool asleep = state == kDeviceStateIdle && idle_ticks_ > kSleepTicks;   // 4 h sin uso
         const int et = (int)emo_t_;
 
         Emotion emo = asleep ? kSleepy : emotion_;

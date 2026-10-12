@@ -6,6 +6,7 @@
 // Entidades que aparecen en HA (dispositivo "Kira Sala"):
 //   sensor         Estado       (reposo, escuchando, hablando...)
 //   sensor         Emocion      (ultima emocion de Kira)
+//   select         Poner emocion (la cara la muestra 20 s si esta en reposo)
 //   number         Volumen      (0-100)
 //   number         Sensibilidad microfono (1-12, se guarda en la placa)
 //   number         Brillo pantalla (1-100 %)
@@ -66,6 +67,17 @@ public:
 
 private:
     static constexpr const char* kTag = "HaBridge";
+
+    // Emociones que se pueden poner desde Home Assistant (castellano -> firmware)
+    struct EmotionName { const char* es; const char* en; };
+    static constexpr EmotionName kEmotions[] = {
+        {"neutral", "neutral"},     {"feliz", "happy"},        {"risa", "laughing"},
+        {"enamorado", "loving"},    {"triste", "sad"},         {"llorando", "crying"},
+        {"enojado", "angry"},       {"sorprendido", "surprised"}, {"shockeado", "shocked"},
+        {"pensando", "thinking"},   {"guino", "winking"},      {"canchero", "cool"},
+        {"dormido", "sleepy"},      {"payaso", "silly"},       {"confundido", "confused"},
+        {"avergonzado", "embarrassed"},
+    };
     static constexpr const char* kBase = "kira/sala";
 
     std::unique_ptr<Mqtt> mqtt_;
@@ -108,6 +120,18 @@ private:
             "\"name\":\"Estado\",\"icon\":\"mdi:robot\",\"state_topic\":\"" + T("estado") + "\"");
         pub("sensor", "emocion",
             "\"name\":\"Emocion\",\"icon\":\"mdi:emoticon-outline\",\"state_topic\":\"" + T("emocion") + "\"");
+        {
+            // Selector para poner una emocion desde las automatizaciones
+            std::string opts;
+            for (const auto& e : kEmotions) {
+                if (!opts.empty()) opts += ",";
+                opts += std::string("\"") + e.es + "\"";
+            }
+            pub("select", "poner_emocion",
+                "\"name\":\"Poner emocion\",\"icon\":\"mdi:emoticon-happy-outline\","
+                "\"options\":[" + opts + "],\"optimistic\":true,"
+                "\"command_topic\":\"" + T("emocion/set") + "\"");
+        }
         pub("number", "volumen",
             "\"name\":\"Volumen\",\"icon\":\"mdi:volume-high\",\"min\":0,\"max\":100,\"step\":5,"
             "\"state_topic\":\"" + T("volumen") + "\",\"command_topic\":\"" + T("volumen/set") + "\"");
@@ -145,6 +169,7 @@ private:
         ESP_LOGI(kTag, "Conectado al broker de Home Assistant");
         mqtt_->Subscribe(T("audio"), 1);
         mqtt_->Subscribe(T("escuchar"), 1);
+        mqtt_->Subscribe(T("emocion/set"), 1);
         mqtt_->Subscribe(T("volumen/set"), 1);
         mqtt_->Subscribe(T("microfono/set"), 1);
         mqtt_->Subscribe(T("brillo/set"), 1);
@@ -175,6 +200,20 @@ private:
                 ESP_LOGI(kTag, "Aviso recibido: %s", pending_text_.c_str());
             }
             cJSON_Delete(root);
+        } else if (topic == T("emocion/set")) {
+            // Acepta el nombre en castellano (selector de HA) o el original en ingles
+            std::string emo;
+            for (const auto& e : kEmotions) {
+                if (payload == e.es || payload == e.en) emo = e.en;
+            }
+            if (emo.empty()) {
+                ESP_LOGW(kTag, "Emocion desconocida: %s", payload.c_str());
+                return;
+            }
+            Application::GetInstance().Schedule([emo]() {
+                auto display = Board::GetInstance().GetDisplay();
+                if (display != nullptr) display->SetEmotion(emo.c_str());
+            });
         } else if (topic == T("escuchar")) {
             Application::GetInstance().Schedule([]() {
                 auto& app = Application::GetInstance();
