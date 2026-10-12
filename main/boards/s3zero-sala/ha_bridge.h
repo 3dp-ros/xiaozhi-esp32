@@ -22,12 +22,16 @@
 // publica {"url": "...", "text": "..."} en kira/sala/audio. El firmware lo
 // reproduce con su reproductor de notificaciones. El paso texto -> audio lo
 // hace el script "Kira decir" en HA (ver instrucciones).
+//
+// Contexto: HA publica {"clima":..,"musica":..,"hora":..} en
+// kira/sala/contexto (ver kira_context.h) y la cara lo usa en reposo.
 
 #include "application.h"
 #include "board.h"
 #include "config.h"
 #include "mic_gain.h"
 #include "kira_controls.h"
+#include "kira_context.h"
 
 #include <mqtt.h>
 #include <wifi_manager.h>
@@ -36,6 +40,7 @@
 #include <freertos/task.h>
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -177,6 +182,7 @@ private:
         mqtt_->Subscribe(T("dormir/set"), 1);
         mqtt_->Subscribe(T("silencio/set"), 1);
         mqtt_->Subscribe(T("noche/set"), 1);
+        mqtt_->Subscribe(T("contexto"), 1);
         mqtt_->Subscribe("homeassistant/status", 1);
         PublishDiscovery();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -214,6 +220,8 @@ private:
                 auto display = Board::GetInstance().GetDisplay();
                 if (display != nullptr) display->SetEmotion(emo.c_str());
             });
+        } else if (topic == T("contexto")) {
+            OnContext(payload);
         } else if (topic == T("escuchar")) {
             Application::GetInstance().Schedule([]() {
                 auto& app = Application::GetInstance();
@@ -249,6 +257,34 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             resend_all_ = true;
         }
+    }
+
+    // {"clima":"lluvia","musica":true,"hora":"21:35"} (todos opcionales)
+    static void OnContext(const std::string& payload) {
+        cJSON* root = cJSON_Parse(payload.c_str());
+        if (root == nullptr) {
+            ESP_LOGW(kTag, "Contexto con JSON invalido");
+            return;
+        }
+        cJSON* clima = cJSON_GetObjectItem(root, "clima");
+        if (cJSON_IsString(clima)) {
+            std::string c = clima->valuestring;
+            int w = kira_ctx::kWeatherNormal;
+            if (c == "lluvia") w = kira_ctx::kWeatherRain;
+            else if (c == "calor") w = kira_ctx::kWeatherHot;
+            else if (c == "frio") w = kira_ctx::kWeatherCold;
+            kira_ctx::weather = w;
+        }
+        cJSON* musica = cJSON_GetObjectItem(root, "musica");
+        if (cJSON_IsBool(musica)) {
+            kira_ctx::music = cJSON_IsTrue(musica);
+        }
+        cJSON* hora = cJSON_GetObjectItem(root, "hora");
+        if (cJSON_IsString(hora)) {
+            int h = -1, m = -1;
+            if (sscanf(hora->valuestring, "%d:%d", &h, &m) == 2) kira_ctx::SetClock(h, m);
+        }
+        cJSON_Delete(root);
     }
 
     static const char* StateName(DeviceState s) {

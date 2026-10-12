@@ -9,7 +9,12 @@
 //
 // En reposo tiene detalles al azar: estrellitas que titilan, una estrella
 // fugaz que sigue con la mirada, una mosca que lo distrae, silba con notas
-// musicales, ojitos de gato, mirada picara...
+// musicales, ojitos de gato, mirada picara, toma mate, bosteza, estornuda,
+// tiene hipo, hace globos de chicle, cabecea, se marea, sigue una pelotita,
+// pasa uno de los gatos (Robin, Nina, Marcia), se le posa un pajarito y
+// muestra la hora. Con el contexto de Home Assistant (kira_context.h)
+// reacciona a la lluvia, el calor, el frio y se pone auriculares si suena
+// musica. Al activar el modo dormir bosteza, dice buenas noches y se apaga.
 //
 // Todo se dibuja pixel a pixel en un canvas de 128x64 y cada forma pasa a la
 // siguiente con una transicion (los ojos se cierran, cambian de forma y se
@@ -26,11 +31,13 @@
 #include "ha_bridge.h"
 #include "config.h"
 #include "kira_controls.h"
+#include "kira_context.h"
 #include "listen_ready.h"
 
 #include <esp_random.h>
 #include <driver/gpio.h>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <utility>
@@ -103,14 +110,16 @@ private:
         kNeutral, kHappy, kLaugh, kLoving, kSad, kCrying, kAngry, kSurprised, kShocked,
         kThinking, kWink, kCool, kSleepy, kSilly, kConfused, kEmbarrassed
     };
-    enum EyeKind { kPill, kClosed, kArcUp, kCat, kHeart, kChevron, kGlasses };
+    enum EyeKind { kPill, kClosed, kArcUp, kCat, kHeart, kChevron, kGlasses, kSpiral };
     enum MouthKind { kMNone, kMSmile, kMSmileBig, kMUwu, kMO, kMOpen, kMFlat, kMTeeth,
                      kMWavy, kMSmirk, kMFrown, kMTrap };
     enum Moment { kMomNone, kMomContent, kMomCat, kMomPicaro, kMomWow, kMomWhistle,
-                  kMomStar, kMomFly };
+                  kMomStar, kMomFly, kMomMate, kMomYawn, kMomSneeze, kMomHiccup, kMomGum,
+                  kMomDoze, kMomDizzy, kMomBall, kMomCatWalk, kMomBird, kMomRain, kMomHot,
+                  kMomCold, kMomMusic, kMomClock, kMomGoodnight };
     enum PartKind { kPartNone, kPartHeart, kPartTear, kPartZ, kPartSpark, kPartStreak,
                     kPartSpeck, kPartNote, kPartDrop, kPartPuff, kPartBang, kPartJa,
-                    kPartSweat };
+                    kPartSweat, kPartHic, kPartSnow, kPartSpray };
 
     struct Eye { float x, y, w, h, r, lin, lout; };
     struct Mouth { float x, y, w, h; };
@@ -135,6 +144,9 @@ private:
     static constexpr float kMouthX = 64.0f;
     static constexpr float kMouthY = 38.0f;
     static constexpr int kMaxParticles = 18;
+    static constexpr int kHic[4] = {12, 40, 62, 90};     // cuando hipa
+    static constexpr int kGoodnightTicks = 115;          // bostezo + buenas noches
+    static constexpr const char* kCatNames[3] = {"ROBIN", "NINA", "MARCIA"};
 
     // ---------------- objetos LVGL ----------------
     lv_obj_t* original_ = nullptr;
@@ -185,6 +197,13 @@ private:
     float voice_lvl_ = 0;     // nivel suavizado del audio que suena (0-1)
     float fly_x_ = 0, fly_y_ = 0;       // mosca (momento)
     float star_x_ = 0, star_y_ = 0;     // estrella fugaz (momento)
+    // objeto del momento (mate, pelotita, gato, pajarito) en pixeles
+    float ox_ = 0, oy_ = 0, ovx_ = 0, ovy_ = 0;
+    int oaux_ = 0;                      // gato elegido / ojo del pajarito
+    int hit_t_ = -100;                  // ultimo pique de la pelotita
+    bool hide_face_ = false;            // la hora tapa la cara
+    bool goodnight_pending_ = false;    // se activo dormir: falta despedirse
+    int sleep_prev_ = -1;
 
     // detalles pedidos por la pose actual
     int fx_hearts_ = 0, fx_tears_ = 0, fx_z_ = 0, fx_sparks_ = 0, fx_streaks_ = 0;
@@ -266,29 +285,145 @@ private:
     }
 
     void EndMoment() {
-        if (moment_ == kMomWhistle) {
-            for (auto& p : parts_) if (p.kind == kPartNote) p.kind = kPartNone;
+        if (moment_ != kMomNone) {
+            // lo que dejo el momento (notas, nieve, "hic") se va con el
+            for (auto& p : parts_) {
+                if (p.kind == kPartNote || p.kind == kPartSnow || p.kind == kPartHic) {
+                    p.kind = kPartNone;
+                }
+            }
         }
+        if (moment_ == kMomGoodnight) OpenEyes();
         moment_ = kMomNone;
         moment_left_ = 0;
+        hide_face_ = false;
         look_tx_ = look_ty_ = 0;
     }
 
-    void StartMoment(Moment m, int ticks) {
+    void StartMoment(Moment m, int ticks, bool rainbow = true) {
         moment_ = m;
         moment_left_ = ticks;
         moment_t_ = 0;
+        look_tx_ = look_ty_ = 0;
         // el LED acompana con un arcoiris y despues se apaga
-        if (EmotionLed::instance != nullptr) {
+        if (rainbow && EmotionLed::instance != nullptr) {
             EmotionLed::instance->Rainbow(ticks * kTickMs);
         }
+    }
+
+    // Elige un momento al azar; los del clima y la musica solo si HA avisa
+    void PickMoment() {
+        int weather = kira_ctx::weather.load();
+        bool music = kira_ctx::music.load();
+        bool clock = kira_ctx::NowMinutes() >= 0;
+        struct Opt { Moment m; int w; };
+        const Opt opts[] = {
+            {kMomContent, 2}, {kMomCat, 2},    {kMomPicaro, 2},  {kMomWow, 1},
+            {kMomWhistle, music ? 0 : 2},      {kMomStar, 2},    {kMomFly, 2},
+            {kMomMate, 2},    {kMomYawn, 2},   {kMomSneeze, 1},  {kMomHiccup, 1},
+            {kMomGum, 2},     {kMomDoze, 1},   {kMomDizzy, 1},   {kMomBall, 2},
+            {kMomCatWalk, 3}, {kMomBird, 2},   {kMomClock, clock ? 2 : 0},
+            {kMomRain, weather == kira_ctx::kWeatherRain ? 5 : 0},
+            {kMomHot, weather == kira_ctx::kWeatherHot ? 5 : 0},
+            {kMomCold, weather == kira_ctx::kWeatherCold ? 5 : 0},
+            {kMomMusic, music ? 12 : 0},
+        };
+        int total = 0;
+        for (auto& o : opts) total += o.w;
+        int r = Rand(total);
+        for (auto& o : opts) {
+            if (r < o.w) {
+                BeginMoment(o.m);
+                return;
+            }
+            r -= o.w;
+        }
+    }
+
+    void BeginMoment(Moment m) {
+        switch (m) {
+            case kMomContent: StartMoment(m, 50); break;       // -‿- contento
+            case kMomCat:                                      // ojitos de gato
+                StartMoment(m, 45);
+                bounce_t_ = 0;
+                break;
+            case kMomPicaro:                                   // reojo y sonrisa ladeada
+                StartMoment(m, 55);
+                look_tx_ = Rand(2) ? 8 : -8;
+                look_hold_until_ = tick_ + 55;
+                break;
+            case kMomWow:                                      // "¡uh!" ojos grandes
+                StartMoment(m, 30);
+                bounce_t_ = 0;
+                break;
+            case kMomWhistle: StartMoment(m, 90); break;       // silba con notitas
+            case kMomStar:                                     // estrella fugaz
+                StartMoment(m, 60);
+                star_x_ = -10;
+                star_y_ = RandF(1, 2.5f);
+                break;
+            case kMomFly:                                      // una mosca lo distrae
+                StartMoment(m, 150);
+                fly_x_ = Rand(2) ? -4 : 132;
+                fly_y_ = RandF(10, 50);
+                break;
+            case kMomMate:                                     // un matecito
+                StartMoment(m, 130);
+                ox_ = 86;
+                oy_ = 80;
+                break;
+            case kMomYawn: StartMoment(m, 75); break;
+            case kMomSneeze: StartMoment(m, 72); break;
+            case kMomHiccup: StartMoment(m, 110); break;
+            case kMomGum: StartMoment(m, 120); break;
+            case kMomDoze: StartMoment(m, 150); break;
+            case kMomDizzy: StartMoment(m, 100); break;
+            case kMomBall: {                                   // pelotita que pica
+                StartMoment(m, 150);
+                int dir = Rand(2) ? 1 : -1;
+                ox_ = dir > 0 ? -5 : 133;
+                oy_ = RandF(14, 24);
+                ovx_ = 1.4f * dir;
+                ovy_ = 0;
+                hit_t_ = -100;
+                break;
+            }
+            case kMomCatWalk: {                                // pasa un gato
+                StartMoment(m, 200);
+                int dir = Rand(2) ? 1 : -1;
+                ox_ = dir > 0 ? -18 : 146;
+                ovx_ = 0.9f * dir;
+                oaux_ = Rand(3);
+                break;
+            }
+            case kMomBird:                                     // pajarito en la cabeza
+                StartMoment(m, 170);
+                oaux_ = Rand(2);
+                ox_ = oaux_ ? 136 : -8;
+                oy_ = RandF(-6, 4);
+                break;
+            case kMomRain: StartMoment(m, 130); break;
+            case kMomHot: StartMoment(m, 130); break;
+            case kMomCold: StartMoment(m, 130); break;
+            case kMomMusic: StartMoment(m, 240); break;
+            case kMomClock: StartMoment(m, 78); break;
+            case kMomGoodnight: StartMoment(m, kGoodnightTicks, false); break;
+            default: break;
+        }
+    }
+
+    // Momentos que no mandan la mirada (puede mirar alrededor)
+    bool GazeFree() const {
+        return moment_ == kMomNone || moment_ == kMomContent || moment_ == kMomCat ||
+               moment_ == kMomWow || moment_ == kMomWhistle || moment_ == kMomHiccup;
     }
 
     // Brillo y encendido de la OLED segun los controles de Home Assistant
     void ApplyPanel() {
         if (io_ == nullptr || panel_ == nullptr) return;
         auto& ctl = kira::Controls::Get();
-        int on = ctl.Sleep() ? 0 : 1;
+        // al activar dormir la pantalla sigue prendida hasta despedirse
+        int on = (ctl.Sleep() && !goodnight_pending_) ? 0 : 1;
         if (on != applied_on_) {
             esp_lcd_panel_disp_on_off(panel_, on);
             applied_on_ = on;
@@ -306,6 +441,16 @@ private:
     void Tick() {
         tick_++;
         emo_t_++;
+
+        // Se acaba de activar el modo dormir: antes de apagarse bosteza y
+        // dice buenas noches (cuando termine la charla, si habia una)
+        int sleep_now = kira::Controls::Get().Sleep() ? 1 : 0;
+        if (sleep_prev_ == 0 && sleep_now) goodnight_pending_ = true;
+        if (!sleep_now) {
+            goodnight_pending_ = false;
+            if (moment_ == kMomGoodnight) EndMoment();
+        }
+        sleep_prev_ = sleep_now;
         ApplyPanel();
 
         // Anti-quemado: cada 10 minutos corre toda la cara 1 px
@@ -315,7 +460,7 @@ private:
         shift_y_ = kShift[slot][1];
 
         auto& app = Application::GetInstance();
-        if (kira::Controls::Get().Sleep()) {
+        if (kira::Controls::Get().Sleep() && !goodnight_pending_) {
             // Durmiendo: si lo llaman con "Ey Kira" se despierta solo.
             // Los avisos de Home Assistant no lo despiertan.
             auto st = app.GetDeviceState();
@@ -330,6 +475,14 @@ private:
         // "Escuchando" recien cuando el audio ya sale (ver listen_ready.h)
         auto state = listen_ready::EffectiveState(app.GetDeviceState());
         idle_ticks_ = (state == kDeviceStateIdle) ? idle_ticks_ + 1 : 0;
+
+        // "Ey Kira" en plena despedida: no se va a dormir
+        if (moment_ == kMomGoodnight &&
+            (state == kDeviceStateListening || state == kDeviceStateConnecting)) {
+            goodnight_pending_ = false;
+            kira::Controls::Get().SetSleep(false);
+            sleep_prev_ = 0;
+        }
 
         // Pirueta cuando suena el "pop" de "ya podes hablar"
         uint32_t cue = app.GetListenCue();
@@ -365,7 +518,24 @@ private:
         }
         prev_state_ = state;
 
+        if (goodnight_pending_ && state == kDeviceStateIdle && moment_ != kMomGoodnight &&
+            spin_t_ < 0) {
+            if (emotion_ != kNeutral) {
+                emotion_ = kNeutral;
+                emo_t_ = 0;
+                HaBridge::Instance().OnEmotion("neutral");
+            }
+            EndMoment();
+            ClearParticles();
+            idle_ticks_ = 0;
+            BeginMoment(kMomGoodnight);
+        }
+
         UpdateTimers(state);
+        if (kira::Controls::Get().Sleep() && !goodnight_pending_) {
+            ApplyPanel();   // termino la despedida: apagar sin otro cuadro
+            return;
+        }
         ApplyMode();
         if (mode_ != 0) return;
 
@@ -391,40 +561,20 @@ private:
         // Momentos en reposo (cada 10 a 25 s)
         if (moment_left_ > 0) {
             moment_t_++;
-            if (--moment_left_ == 0) EndMoment();
-        } else if (state == kDeviceStateIdle && idle_ticks_ < kSleepTicks &&
-                   emotion_ == kNeutral && tick_ >= next_moment_) {
-            int r = Rand(14);
-            if (r < 2) {
-                StartMoment(kMomContent, 50);      // -‿- contento
-            } else if (r < 4) {
-                StartMoment(kMomCat, 45);          // ojitos de gato con saltito
-                bounce_t_ = 0;
-            } else if (r < 6) {
-                StartMoment(kMomPicaro, 55);       // reojo y sonrisa ladeada
-                look_tx_ = Rand(2) ? 8 : -8;
-                look_ty_ = 0;
-                look_hold_until_ = tick_ + 55;
-            } else if (r < 7) {
-                StartMoment(kMomWow, 30);          // "¡uh!" ojos grandes
-                bounce_t_ = 0;
-            } else if (r < 9) {
-                StartMoment(kMomWhistle, 90);      // silba con notitas
-            } else if (r < 11) {
-                StartMoment(kMomStar, 60);         // estrella fugaz
-                star_x_ = -10;
-                star_y_ = RandF(1, 2.5f);
-            } else {
-                StartMoment(kMomFly, 150);         // una mosca lo distrae
-                fly_x_ = Rand(2) ? -4 : 132;
-                fly_y_ = RandF(10, 50);
+            if (--moment_left_ == 0) {
+                if (moment_ == kMomGoodnight) goodnight_pending_ = false;   // a dormir
+                EndMoment();
             }
+        } else if (state == kDeviceStateIdle && idle_ticks_ < kSleepTicks &&
+                   emotion_ == kNeutral && tick_ >= next_moment_ && !goodnight_pending_) {
+            PickMoment();
             next_moment_ = tick_ + 250 + Rand(375);
         }
 
+        MomentMotion();
+
         // Mirar alrededor (solo en reposo y sin momento que mande la mirada)
-        bool gaze_free = moment_ != kMomPicaro && moment_ != kMomStar && moment_ != kMomFly;
-        if (state == kDeviceStateIdle && gaze_free) {
+        if (state == kDeviceStateIdle && GazeFree()) {
             if (tick_ >= next_look_ && tick_ >= look_hold_until_) {
                 if (look_tx_ == 0 && look_ty_ == 0 && Rand(3) > 0) {
                     static const float xs[] = {-9, -6, 6, 9};
@@ -473,6 +623,91 @@ private:
         if (spin_t_ >= 0 && ++spin_t_ >= kShakeTicks + kHappyTicks) spin_t_ = -1;
     }
 
+    // Lugar donde se posa el pajarito: arriba del ojo elegido
+    void BirdPerch(float& x, float& y) const {
+        const Eye& e = cur_[oaux_];
+        x = TX(e.x) + (oaux_ ? 3.0f : -3.0f);
+        y = TY(e.y - e.h / 2) - 3.5f;
+    }
+
+    // Movimiento de los objetos de cada momento y a donde mira Kira
+    void MomentMotion() {
+        const int t = moment_t_;
+        switch (moment_) {
+            case kMomMate:
+                // sube desde abajo, se queda mientras toma y despues baja
+                if (t < 95) oy_ = Approach(oy_, 56, 0.2f);
+                else oy_ += 1.3f;
+                look_tx_ = t < 20 ? 3 : 0;
+                look_ty_ = t < 20 ? 1 : 0;
+                break;
+            case kMomSneeze:
+                look_ty_ = t < 30 ? -2 : (t < 45 ? 2 : 0);
+                break;
+            case kMomGum:
+                look_ty_ = (t >= 12 && t < 75) ? 2.5f : 0;
+                break;
+            case kMomDoze:
+                if (t == 95) bounce_t_ = 0;   // se despierta de golpe
+                // mira para todos lados como si nada
+                look_tx_ = (t >= 105 && t < 137) ? (((t - 105) / 8) % 2 ? 8.0f : -8.0f) : 0;
+                break;
+            case kMomBall: {
+                ox_ += ovx_;
+                ovy_ += 0.35f;
+                oy_ += ovy_;
+                if (oy_ > 59) {
+                    oy_ = 59;
+                    ovy_ = -4.4f;
+                    hit_t_ = t;
+                }
+                look_tx_ = Clamp((ox_ - 64) / 6, -9, 9);
+                look_ty_ = Clamp((oy_ - 30) / 7, -3, 4);
+                bool gone = ovx_ > 0 ? ox_ > 136 : ox_ < -8;
+                if (gone) {
+                    look_tx_ = look_ty_ = 0;
+                    if (moment_left_ > 20) moment_left_ = 20;
+                }
+                break;
+            }
+            case kMomCatWalk: {
+                ox_ += ovx_;
+                look_tx_ = Clamp((ox_ - 64) / 7, -8, 8);
+                look_ty_ = 1.5f;
+                bool gone = ovx_ > 0 ? ox_ > 146 : ox_ < -18;
+                if (gone) {
+                    look_tx_ = look_ty_ = 0;
+                    if (moment_left_ > 12) moment_left_ = 12;
+                }
+                break;
+            }
+            case kMomBird: {
+                float px, py;
+                BirdPerch(px, py);
+                if (t < 35) {
+                    // llega volando en curva
+                    float k = t < 28 ? 0.1f : 0.4f;
+                    ox_ = Approach(ox_, px, k);
+                    oy_ = Approach(oy_, py, k) - (t < 28 ? 1.2f * sinf(t * 0.4f) : 0);
+                } else if (t < 130) {
+                    ox_ = px;
+                    oy_ = py;
+                } else {
+                    ox_ += oaux_ ? 2.0f : -2.0f;
+                    oy_ -= 1.0f;
+                }
+                look_tx_ = (t < 135) ? (oaux_ ? 2.0f : -2.0f) : 0;
+                look_ty_ = (t < 135) ? -0.5f : 0;
+                break;
+            }
+            case kMomRain:
+                look_ty_ = (t < 42) ? -2 : (t < 60 ? 0 : -1);
+                break;
+            default:
+                break;
+        }
+    }
+
     // ================= pose: a donde tiene que ir cada parte =================
     void Pose(DeviceState state) {
         bool listening = state == kDeviceStateListening;
@@ -495,6 +730,7 @@ private:
         fx_specks_ = fx_blush_ = fx_question_ = fx_glint_ = 0;
         fx_cloud_ = fx_vein_ = fx_waves_ = fx_moon_ = fx_thought_ = 0;
         fx_sweat_ = fx_tongue_ = fx_bang_ = fx_ja_ = fx_notes_ = fx_winkstar_ = 0;
+        hide_face_ = false;
         float target_drop = 0;
 
         switch (emo) {
@@ -536,6 +772,7 @@ private:
                         mh = 3;
                         break;
                     default:
+                        PoseMoment(mk, mw, mh, mdx, mdy);
                         break;
                 }
                 if (listening) {
@@ -784,6 +1021,233 @@ private:
         mouth_tgt_ = {kMouthX + mdx, kMouthY + mdy, mw, mh};
     }
 
+    // Bostezo (lo usan el momento y la despedida de buenas noches)
+    void YawnPose(int t, MouthKind& mk, float& mw, float& mh, float& mdy) {
+        if (t < 12) {
+            // entrecierra los ojos y empieza a abrir la boca
+            float k = t / 12.0f;
+            for (auto& e : tgt_) { e.h = 30 - 14 * k; e.y += 3 * k; }
+            mk = kMO; mw = 5 + 6 * k; mh = 5 + 9 * k;
+        } else if (t < 48) {
+            // bocon con los ojos cerrados, se estira para arriba
+            want_[0] = want_[1] = kClosed;
+            for (int i = 0; i < 2; i++) {
+                tgt_[i].y -= 2;
+                tgt_[i].x += i == 0 ? -1.5f : 1.5f;
+            }
+            mdy -= 1;
+            mk = kMO; mw = 12; mh = 15 + sinf(t * 0.4f);
+        } else if (t < 60) {
+            want_[0] = want_[1] = kClosed;
+            float k = (t - 48) / 12.0f;
+            mk = kMO; mw = 12 - 7 * k; mh = 15 - 10 * k;
+        } else {
+            mk = kMSmile; mw = 10; mh = 4;
+        }
+    }
+
+    float GumRadius(int t) const {
+        if (t < 12 || t >= 75) return 0;
+        return fminf(11.0f, 1.5f + (t - 12) * 0.17f);
+    }
+
+    // Poses de los momentos nuevos del reposo
+    void PoseMoment(MouthKind& mk, float& mw, float& mh, float& mdx, float& mdy) {
+        const int t = moment_t_;
+        auto head = [&](float dx, float dy) {
+            for (auto& e : tgt_) { e.x += dx; e.y += dy; }
+            mdx += dx;
+            mdy += dy;
+        };
+        switch (moment_) {
+            case kMomMate:
+                if (t >= 20 && t < 95) {
+                    // toma con los ojos cerrados, la cabeza baja en cada sorbo
+                    want_[0] = want_[1] = kClosed;
+                    mk = kMO; mw = 4; mh = 4; mdx = 4;
+                    head(0, ((t / 14) % 2) ? 0.8f : 0);
+                } else if (t >= 95) {
+                    want_[0] = want_[1] = kArcUp;     // "ahh" que rico
+                    mk = kMSmileBig; mw = 15; mh = 6;
+                } else {
+                    mk = kMO; mw = 5; mh = 5;
+                }
+                break;
+            case kMomYawn:
+            case kMomGoodnight: {
+                if (moment_ == kMomGoodnight && t >= 60) {
+                    // ojitos cerrados, cabecita baja y luna
+                    want_[0] = want_[1] = kClosed;
+                    head(0, 4);
+                    mk = kMUwu; mw = 10; mh = 4;
+                    fx_moon_ = 1;
+                } else {
+                    YawnPose(t, mk, mw, mh, mdy);
+                }
+                break;
+            }
+            case kMomSneeze:
+                if (t < 30) {
+                    // "a... a..." se le cierran los ojos y tira la cabeza atras
+                    float k = t / 30.0f;
+                    for (auto& e : tgt_) { e.h = 30 - 12 * k; e.y -= 2 * k; }
+                    if (t == 10 || t == 11 || t == 20 || t == 21) head(0, -1.5f);
+                    mk = kMO; mw = 4 + 3 * k; mh = 4 + 5 * k;
+                } else if (t < 50) {
+                    // ¡ACHIS!
+                    want_[0] = want_[1] = kChevron;
+                    head(0, t < 36 ? 3.0f : 1.5f);
+                    mk = kMOpen; mw = 12; mh = t < 38 ? 9 : 6;
+                    if (t < 40) shake_x_ = (t % 2) ? 2.5f : -2.5f;
+                } else {
+                    mk = kMWavy; mw = 9; mh = 2;     // sorbe, medio avergonzado
+                    fx_blush_ = 1;
+                }
+                break;
+            case kMomHiccup: {
+                int d = 99;
+                for (int h : kHic) if (t >= h && t - h < d) d = t - h;
+                if (d < 5) {
+                    head(0, d < 2 ? -4.0f : -1.5f);   // ¡hic! salto
+                    for (auto& e : tgt_) { e.h = 35; e.w = 24; }
+                    mk = kMO; mw = 5; mh = 5;
+                } else if (t < 100) {
+                    for (auto& e : tgt_) e.h = 28;
+                    mk = kMFlat; mw = 6; mh = 3;
+                }
+                break;
+            }
+            case kMomGum: {
+                if (t < 12) {
+                    mk = ((t / 4) % 2) ? kMFlat : kMO; mw = 5; mh = 3;   // mastica
+                } else if (t < 75) {
+                    // el globo crece y lo mira bizco
+                    float k = (t - 12) / 63.0f;
+                    for (auto& e : tgt_) e.h = (t > 62) ? 24 : 30 + 4 * k;
+                    tgt_[0].x += 2 * k;
+                    tgt_[1].x -= 2 * k;
+                    mk = kMO; mw = 3; mh = 3;
+                } else if (t < 84) {
+                    // ¡plop!
+                    for (auto& e : tgt_) { e.h = 36; e.w = 24; }
+                    shake_x_ = (t % 2) ? 1.5f : -1.5f;
+                    mk = kMO; mw = 6; mh = 6;
+                } else {
+                    want_[0] = want_[1] = kArcUp;
+                    mk = kMSmileBig; mw = 14; mh = 6;
+                }
+                break;
+            }
+            case kMomDoze:
+                if (t < 70) {
+                    // se le cierran los ojos de a poco (y pelea un par de veces)
+                    float k = t / 70.0f;
+                    float h = 30 - 24 * k;
+                    if (t > 10 && (t % 25) < 4) h += 12;
+                    for (auto& e : tgt_) { e.h = h; e.y += (30 - h) * 0.3f; }
+                    head(0, 4 * k);
+                    mk = kMFlat; mw = 6; mh = 3;
+                } else if (t < 95) {
+                    want_[0] = want_[1] = kClosed;   // cabeceo
+                    head(0, 4 + (t < 80 ? (t - 70) * 0.3f : 3.0f));
+                    mk = kMO; mw = 4; mh = 4;
+                } else if (t < 105) {
+                    for (auto& e : tgt_) { e.h = 38; e.w = 25; }   // ¡se despierta!
+                    mk = kMO; mw = 6; mh = 7;
+                } else {
+                    mk = kMFlat; mw = 8; mh = 3;     // aca no paso nada
+                    fx_sweat_ = 1;
+                }
+                break;
+            case kMomDizzy:
+                if (t < 85) {
+                    want_[0] = want_[1] = kSpiral;
+                    float a = t * 0.25f;
+                    head(3 * cosf(a), 1.5f + 1.5f * sinf(a));
+                    mk = kMWavy; mw = 12; mh = 3;
+                } else {
+                    if (t < 95) shake_x_ = ((t / 2) % 2) ? 2.0f : -2.0f;
+                    mk = kMFlat; mw = 8; mh = 3;
+                }
+                break;
+            case kMomBall: {
+                bool gone = ovx_ > 0 ? ox_ > 136 : ox_ < -8;
+                if (gone) {
+                    want_[0] = want_[1] = kArcUp;
+                    mk = kMSmile; mw = 13; mh = 5;
+                } else {
+                    mk = kMO; mw = 5; mh = 5;
+                    if (t - hit_t_ < 3) {
+                        for (auto& e : tgt_) { e.h -= 6; e.y += 2; }   // pique
+                    }
+                }
+                break;
+            }
+            case kMomCatWalk:
+                if (fabsf(ox_ - 64) < 22) {
+                    want_[0] = want_[1] = kArcUp;    // ternura
+                    mk = kMUwu; mw = 12; mh = 4;
+                } else {
+                    mk = kMSmile; mw = 12; mh = 5;
+                }
+                break;
+            case kMomBird:
+                if (t >= 35 && t < 130) {
+                    // el ojo se aplasta un poquito con el pajarito encima
+                    float extra = (t < 41) ? 3.0f : 0.0f;
+                    tgt_[oaux_].h -= 4 + extra;
+                    tgt_[oaux_].y += 2 + extra / 2;
+                }
+                if (t >= 80 && t < 96) want_[0] = want_[1] = kArcUp;
+                if (t < 35 || t >= 130) { mk = kMO; mw = 5; mh = 5; }
+                else { mk = kMSmile; mw = 12; mh = 5; }
+                break;
+            case kMomRain:
+                fx_cloud_ = 1;
+                if (t >= 42 && t < 60) {
+                    // le cayo una gota: se sacude
+                    want_[0] = want_[1] = kChevron;
+                    shake_x_ = (t % 2) ? 2.0f : -2.0f;
+                    mk = kMFlat; mw = 8; mh = 3;
+                } else if (t < 42) {
+                    mk = kMO; mw = 5; mh = 5;
+                } else {
+                    mk = kMFlat; mw = 7; mh = 3;
+                }
+                break;
+            case kMomHot:
+                // ojos caidos, jadea con la lengua afuera y transpira
+                for (auto& e : tgt_) { e.h = 19; e.y += 4; e.lout = 0.3f; }
+                mk = kMOpen; mw = 10; mh = ((t / 6) % 2) ? 9 : 6;
+                fx_sweat_ = 1;
+                break;
+            case kMomCold:
+                // tirita y le castanetean los dientes
+                for (auto& e : tgt_) { e.h = 22; e.w = 20; e.y += 2; }
+                shake_x_ = (t % 2) ? 0.8f : -0.8f;
+                mk = kMTeeth; mw = 12; mh = ((t / 2) % 2) ? 3 : 6;
+                fx_blush_ = 1;
+                break;
+            case kMomMusic: {
+                // auriculares: cabecea al ritmo con los ojos cerrados
+                float beat = fabsf(sinf(t * 3.14159f / 12));
+                head(2 * sinf(t * 3.14159f / 24), 1 - 2 * beat);
+                if ((t / 48) % 3 != 2) want_[0] = want_[1] = kClosed;
+                bool sing = (t / 24) % 2;
+                mk = sing ? kMO : kMSmile; mw = sing ? 5 : 12; mh = 5;
+                break;
+            }
+            case kMomClock:
+                // cierra los ojos y en su lugar aparece la hora
+                if (t < 66) want_[0] = want_[1] = kClosed;
+                hide_face_ = t >= 6 && t < 66;
+                if (hide_face_) mk = kMNone;
+                break;
+            default:
+                break;
+        }
+    }
+
     // ================= interpolacion y cambios de forma =================
     void Animate(DeviceState state) {
         for (int i = 0; i < 2; i++) {
@@ -924,6 +1388,7 @@ private:
         if (moment_ == kMomStar && star_x_ < 128 && (moment_t_ % 3) == 0) {
             Spawn(kPartSpark, star_x_ - 6, star_y_, 0, 0.2f, 8, 1);
         }
+        SpawnMomentParticles();
 
         for (auto& p : parts_) {
             if (p.kind == kPartNone) continue;
@@ -933,9 +1398,96 @@ private:
             if (p.kind == kPartHeart) p.vx = 0.4f * sinf((p.age + p.size) * 0.3f);
             if (p.kind == kPartNote) p.vy = -0.25f + 0.45f * sinf(p.age * 0.35f);
             if (p.kind == kPartSweat && p.age > 20) p.vy = 0.35f;
+            if (p.kind == kPartSnow) p.vx = 0.3f * sinf(p.age * 0.12f + p.size);
+            if (p.kind == kPartSpray) p.vy += 0.1f;
             p.x += p.vx;
             p.y += p.vy;
             if (p.y > kH + 8 || p.y < -12 || p.x < -10 || p.x > kW + 10) p.kind = kPartNone;
+        }
+    }
+
+    void SpawnMomentParticles() {
+        const int t = moment_t_;
+        float mx = TX(mouth_.x), my = TY(mouth_.y);
+        switch (moment_) {
+            case kMomMate:
+                // vaporcito del mate
+                if (t >= 20 && t < 95 && (t % 16) == 0) {
+                    Spawn(kPartPuff, ox_ + 3, oy_ - 9, 0.1f, -0.5f, 12, 1);
+                }
+                break;
+            case kMomSneeze:
+                if (t == 31) {
+                    for (int k = 0; k < 7; k++) {
+                        Spawn(kPartSpray, mx + RandF(-3, 3), my + 6, RandF(-2.5f, 2.5f),
+                              RandF(-0.5f, 1.0f), 14, 1);
+                    }
+                }
+                break;
+            case kMomHiccup:
+                for (int i = 0; i < 4; i++) {
+                    if (t == kHic[i]) {
+                        Spawn(kPartHic, (i % 2) ? 1.0f : 109.0f, 24, 0, -0.6f, 22, 1);
+                    }
+                }
+                break;
+            case kMomGum:
+                if (t == 75) {
+                    // el globo explota en chispitas
+                    float r = 11, cx = mx, cy = my + 2 + r * 0.85f;
+                    for (int k = 0; k < 6; k++) {
+                        float a = k * 1.047f + 0.3f;
+                        Spawn(kPartSpark, cx + r * cosf(a), cy + r * sinf(a),
+                              1.2f * cosf(a), 1.2f * sinf(a), 9, 2);
+                    }
+                }
+                break;
+            case kMomDoze:
+                if (t == 72 || t == 86) Spawn(kPartZ, 104, 22, 0.35f, -0.45f, 30, 3);
+                if (t == 95) {
+                    Spawn(kPartBang, 9, 14, 0, 0, 16, 6);
+                    Spawn(kPartBang, 119, 14, 0, 0, 16, 6);
+                }
+                break;
+            case kMomCatWalk:
+                if (fabsf(ox_ - 64) <= 0.45f) {
+                    Spawn(kPartHeart, 64, 12, 0, -0.5f, 26, 6);
+                }
+                break;
+            case kMomBird:
+                // pio pio: notitas que salen del pico
+                if (t >= 45 && t < 125 && (t % 30) == 15) {
+                    float dir = oaux_ ? -1.0f : 1.0f;   // mira hacia el centro
+                    Spawn(kPartNote, ox_ + dir * 6, oy_ - 4, dir * 0.8f, -0.2f, 26, 3);
+                }
+                break;
+            case kMomRain:
+                if (t == 42) {
+                    float x = TX(cur_[0].x) + 2, y = TY(cur_[0].y - cur_[0].h / 2);
+                    for (int k = 0; k < 5; k++) {
+                        Spawn(kPartSpray, x, y, RandF(-1.8f, 1.8f), RandF(-1.6f, -0.6f), 12, 1);
+                    }
+                }
+                break;
+            case kMomCold:
+                if ((t % 6) == 0) {
+                    // copitos de nieve por los costados y el centro
+                    int r = Rand(3);
+                    float x = r == 0 ? RandF(2, 16) : (r == 1 ? RandF(112, 126) : RandF(54, 74));
+                    Spawn(kPartSnow, x, -2, 0, 0.5f, 140, Rand(6));
+                }
+                break;
+            case kMomMusic:
+                if ((t % 20) == 0) {
+                    bool left = (t / 20) % 2;
+                    Spawn(kPartNote, left ? 6.0f : 116.0f, 16, left ? -0.15f : 0.15f, -0.2f, 34, 4);
+                }
+                break;
+            case kMomGoodnight:
+                if (t == 70 || t == 88) Spawn(kPartZ, 104, 22, 0.35f, -0.45f, 30, 3);
+                break;
+            default:
+                break;
         }
     }
 
@@ -1100,6 +1652,73 @@ private:
         }
     }
 
+    // Letritas de 5x7 pixeles (hora, "HIC", "ACHIS!", nombres de los gatos)
+    static const uint8_t* FontGlyph(char c) {
+        struct G { char c; uint8_t rows[7]; };
+        static const G kFont[] = {
+            {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+            {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+            {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+            {'3', {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E}},
+            {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+            {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
+            {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+            {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+            {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+            {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+            {':', {0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00}},
+            {'!', {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04}},
+            {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+            {'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
+            {'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
+            {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
+            {'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+            {'I', {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+            {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
+            {'N', {0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11}},
+            {'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+            {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
+            {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
+            {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+            {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+        };
+        for (const auto& g : kFont) if (g.c == c) return g.rows;
+        return nullptr;
+    }
+
+    // ';' = lugar de los dos puntos sin dibujarlos (titilan en la hora)
+    static int Advance(char c) { return (c == ':' || c == ';') ? 3 : (c == ' ' ? 4 : 6); }
+
+    static int TextWidth(const char* s, int sc) {
+        int w = 0;
+        for (const char* p = s; *p; p++) w += Advance(*p) * sc;
+        return w > 0 ? w - sc : 0;
+    }
+
+    // Texto con puntitos: a escala 1 pixel a pixel, mas grande tipo "matriz"
+    void Text(const char* s, float x, float y, int sc, uint8_t v = 1) {
+        int cx = (int)lroundf(x), cy = (int)lroundf(y);
+        int dot = sc > 1 ? sc - 1 : 1;
+        for (; *s; s++) {
+            const uint8_t* g = FontGlyph(*s);
+            for (int r = 0; g != nullptr && r < 7; r++) {
+                for (int c = 0; c < 5; c++) {
+                    if (!(g[r] & (0x10 >> c))) continue;
+                    for (int dy = 0; dy < dot; dy++) {
+                        for (int dx = 0; dx < dot; dx++) Px(cx + c * sc + dx, cy + r * sc + dy, v);
+                    }
+                }
+            }
+            cx += Advance(*s) * sc;
+        }
+    }
+
+    // Texto con un borde apagado alrededor (se lee aunque pase sobre algo)
+    void TextBoxed(const char* s, float x, float y, int sc) {
+        RoundRect(x + TextWidth(s, sc) / 2.0f, y + 3.5f * sc, TextWidth(s, sc) + 4, 7 * sc + 4, 2, 0);
+        Text(s, x, y, sc);
+    }
+
     void DrawEye(int i) {
         const Eye& d = cur_[i];
         // a pixeles de pantalla
@@ -1166,6 +1785,23 @@ private:
                 if (i == 1 && kind_[0] == kGlasses) {
                     // puente entre los lentes
                     Line(TX(cur_[0].x) + 17, gy - 5, e.x - 17, gy - 5, 1.2f);
+                }
+                break;
+            }
+            case kSpiral: {
+                // espiral que gira (mareado), cada ojo para un lado
+                float rot = tick_ * 0.35f * inner;
+                float R = 12.0f * s;
+                float px = e.x, py = e.y;
+                const int n = 40;
+                for (int k = 1; k <= n; k++) {
+                    float a = k * (2.7f * 6.2831853f / n);
+                    float r = R * k / n;
+                    float x = e.x + r * cosf(a * inner + rot);
+                    float y = e.y + r * sinf(a * inner + rot);
+                    Line(px, py, x, y, 0.9f);
+                    px = x;
+                    py = y;
                 }
                 break;
             }
@@ -1332,6 +1968,20 @@ private:
                     Line(p.x, p.y + 1, p.x, p.y - 2, 0.6f);
                     Px((int)p.x, (int)p.y + 1, 0);   // brillito
                     break;
+                case kPartHic:
+                    if (p.life - p.age < 5 && (p.age % 2)) break;
+                    Text("HIC", p.x, p.y, 1);
+                    break;
+                case kPartSnow: {
+                    int x = (int)lroundf(p.x), y = (int)lroundf(p.y);
+                    Px(x, y);
+                    Px(x - 1, y); Px(x + 1, y); Px(x, y - 1); Px(x, y + 1);
+                    break;
+                }
+                case kPartSpray:
+                    Px((int)lroundf(p.x), (int)lroundf(p.y));
+                    Px((int)lroundf(p.x) + 1, (int)lroundf(p.y));
+                    break;
                 case kPartNone:
                 default:
                     break;
@@ -1426,7 +2076,195 @@ private:
                 Px((int)fly_x_ + 2, (int)fly_y_ - 1);
             }
         }
+        DrawMomentObjects();
         (void)state;
+    }
+
+    // Gatito caminando por abajo (dir 1 = hacia la derecha)
+    void DrawCat(float x, float dir, int step) {
+        const float by = 58.5f;
+        Ellipse(x, by, 7.5f, 3.2f);                       // cuerpo
+        float hx = x + dir * 8, hy = 54.5f;
+        Ellipse(hx, hy, 3.2f, 3.0f);                      // cabeza
+        for (int s = -1; s <= 1; s += 2) {                // orejas
+            Line(hx + s * 2.4f, hy - 1.5f, hx + s * 2.2f, hy - 4.6f, 0.5f);
+            Line(hx + s * 2.2f, hy - 4.6f, hx + s * 0.6f, hy - 2.5f, 0.5f);
+        }
+        Px((int)lroundf(hx + dir * 1.3f), (int)lroundf(hy - 0.5f), 0);   // ojito
+        float tx = x - dir * 7, sw = 1.5f * sinf(step * 0.15f);
+        Line(tx, by - 1, tx - dir * 3, by - 5, 0.6f);     // cola
+        Line(tx - dir * 3, by - 5, tx - dir * 2 + sw, by - 9, 0.6f);
+        int ph = (step / 4) % 2;
+        for (int k = 0; k < 4; k++) {                     // patitas
+            float lx = x - 5.5f + k * 3.7f;
+            float off = ((k + ph) % 2) ? 1.0f : -0.5f;
+            Line(lx, by + 2, lx + off * dir, 63, 0.55f);
+        }
+    }
+
+    // Pajarito (f = 1 mira a la derecha)
+    void DrawBird(float x, float y, float f, bool flying, bool wing_up, bool peck) {
+        Ellipse(x, y, 6.5f, 5.0f, 0);                     // borde apagado
+        Ellipse(x, y, 3.5f, 2.6f);
+        float hx = x + f * (peck ? 4.0f : 3.0f), hy = peck ? y - 0.5f : y - 2.0f;
+        Ellipse(hx, hy, 2.1f, 2.0f);
+        Line(hx + f * 1.8f, hy, hx + f * 3.6f, hy + 0.6f, 0.45f);   // pico
+        Px((int)lroundf(hx + f * 0.6f), (int)lroundf(hy - 0.6f), 0);
+        Line(x - f * 3, y, x - f * 6, y - 1.5f, 0.6f);   // cola
+        if (flying) {
+            if (wing_up) {
+                Line(x, y - 1, x - f * 1.5f, y - 6, 0.6f);
+                Line(x, y - 1, x + f * 1.5f, y - 6, 0.6f);
+            } else {
+                Line(x, y, x - f * 2.5f, y + 3.5f, 0.6f);
+            }
+        } else {
+            Px((int)x - 1, (int)y + 3);
+            Px((int)x + 1, (int)y + 3);
+        }
+    }
+
+    // Lo que aparece en pantalla durante cada momento
+    void DrawMomentObjects() {
+        const int t = moment_t_;
+        switch (moment_) {
+            case kMomMate: {
+                float cx = ox_, cy = oy_;
+                if (cy > 75) break;
+                bool sip = t >= 20 && t < 95;
+                float tipx = sip ? TX(mouth_.x) + 2 : cx - 7;
+                float tipy = sip ? TY(mouth_.y) + 3 : cy - 15;
+                Ellipse(cx, cy, 10, 11, 0);
+                Line(cx - 2, cy - 6, tipx, tipy, 1.4f, 0);
+                Line(cx - 2, cy - 6, tipx, tipy, 0.6f);         // bombilla
+                Ellipse(tipx, tipy, 1.0f, 1.0f);
+                Ellipse(cx, cy + 1.5f, 7.5f, 6.5f);             // calabaza
+                RoundRect(cx, cy - 5, 11, 3, 1);                // boca del mate
+                Line(cx - 5, cy + 2, cx + 5, cy + 2, 0.5f, 0);  // guarda
+                break;
+            }
+            case kMomSneeze:
+                if (t >= 30 && t < 55) {
+                    float j = (t < 40) ? (float)((t % 2) * 2 - 1) : 0;
+                    Text("ACHIS!", 46.5f + j, 1, 1);
+                }
+                break;
+            case kMomGum: {
+                float r = GumRadius(t);
+                if (r > 0) {
+                    float cx = TX(mouth_.x), cy = TY(mouth_.y) + 2 + r * 0.85f;
+                    Ellipse(cx, cy, r + 1, r + 1, 0);
+                    Ring(cx, cy, r, r, 1.3f);
+                    if (r > 4) Line(cx - r * 0.55f, cy - r * 0.2f, cx - r * 0.25f, cy - r * 0.55f, 0.6f);
+                } else if (t >= 75 && t < 86) {
+                    TextBoxed("POP!", 52.5f, 52, 1);
+                }
+                break;
+            }
+            case kMomDizzy:
+                if (t < 85) {
+                    for (int k = 0; k < 3; k++) {
+                        float a = t * 0.2f + k * 2.094f;
+                        Sparkle(64 + 22 * cosf(a), 4 + 2.5f * sinf(a), sinf(a) > 0 ? 2.0f : 1.5f);
+                    }
+                }
+                break;
+            case kMomBall: {
+                bool gone = ovx_ > 0 ? ox_ > 136 : ox_ < -8;
+                if (gone) break;
+                Ellipse(ox_, oy_, 5, 5, 0);
+                if (t - hit_t_ < 2) {
+                    Ellipse(ox_, oy_ + 0.8f, 4.2f, 2.6f);     // se aplasta al picar
+                } else {
+                    Ellipse(ox_, oy_, 3.4f, 3.4f);
+                    float a = ox_ * 0.25f;
+                    Line(ox_ - 2.6f * cosf(a), oy_ - 2.6f * sinf(a), ox_ + 2.6f * cosf(a),
+                         oy_ + 2.6f * sinf(a), 0.45f, 0);
+                }
+                break;
+            }
+            case kMomCatWalk: {
+                float dir = ovx_ > 0 ? 1.0f : -1.0f;
+                if (ox_ < -16 || ox_ > 144) break;
+                DrawCat(ox_, dir, t);
+                const char* name = kCatNames[oaux_];
+                Text(name, 64 - TextWidth(name, 1) / 2.0f, 0, 1);
+                break;
+            }
+            case kMomBird: {
+                bool perched = t >= 35 && t < 130;
+                float f = perched ? (oaux_ ? -1.0f : 1.0f)
+                                  : (t < 35 ? (oaux_ ? -1.0f : 1.0f) : (oaux_ ? 1.0f : -1.0f));
+                if (ox_ < -10 || ox_ > 138 || oy_ < -10) break;
+                DrawBird(ox_, oy_, f, !perched, (tick_ / 2) % 2, perched && (t % 20) < 3);
+                break;
+            }
+            case kMomRain:
+                if (t >= 30 && t < 42) {
+                    // gotaza que cae justo sobre la cabeza
+                    float x = TX(cur_[0].x) + 2, top = TY(cur_[0].y - cur_[0].h / 2);
+                    float y = -4 + (top + 2) * (t - 30) / 12.0f;
+                    Ellipse(x, y + 1, 1.8f, 2.3f);
+                    Line(x, y - 1, x, y - 3, 0.5f);
+                }
+                break;
+            case kMomHot: {
+                // sol con rayos que giran y aire caliente arriba
+                Ellipse(10, 9, 3.5f, 3.5f);
+                for (int k = 0; k < 8; k++) {
+                    float a = k * 0.785f + tick_ * 0.05f;
+                    Line(10 + 5.5f * cosf(a), 9 + 5.5f * sinf(a), 10 + 7.5f * cosf(a),
+                         9 + 7.5f * sinf(a), 0.5f);
+                }
+                for (int w = 0; w < 3; w++) {
+                    float x0 = 56 + w * 8, px = 0, py = 0;
+                    for (int k = 0; k <= 7; k++) {
+                        float y = 8 - k;
+                        float x = x0 + 1.2f * sinf(y * 0.9f + tick_ * 0.4f + w);
+                        if (k > 0) Line(px, py, x, y, 0.45f);
+                        px = x; py = y;
+                    }
+                }
+                break;
+            }
+            case kMomMusic: {
+                // auriculares que siguen el cabeceo
+                float dx = ((cur_[0].x + cur_[1].x) / 2 - kCx) * kS;
+                float dy = ((cur_[0].y + cur_[1].y) / 2 - kEyeY) * kS;
+                for (int pass = 0; pass < 2; pass++) {
+                    float px = 0, py = 0;
+                    for (int k = 0; k <= 20; k++) {
+                        float a = 3.14159f * k / 20;
+                        float x = 64 + dx - 57 * cosf(a), y = 27 + dy - 25 * sinf(a);
+                        if (k > 0) Line(px, py, x, y, pass == 0 ? 1.6f : 0.7f, pass == 0 ? 0 : 1);
+                        px = x; py = y;
+                    }
+                }
+                for (int s = -1; s <= 1; s += 2) {
+                    float cx = 64 + dx + s * 57;
+                    RoundRect(cx, 30 + dy, 10, 17, 3, 0);
+                    RoundRect(cx, 30 + dy, 8, 15, 3);
+                    RoundRect(cx - s * 4.5f, 30 + dy, 3, 10, 1);
+                }
+                break;
+            }
+            case kMomClock: {
+                if (!hide_face_) break;
+                int m = kira_ctx::NowMinutes();
+                if (m < 0) break;
+                char buf[8];
+                bool colon = (tick_ / 12) % 2 == 0;
+                snprintf(buf, sizeof(buf), "%d%c%02d", m / 60, colon ? ':' : ';', m % 60);
+                int sc = (t < 9 || t >= 63) ? 2 : ((t < 12 || t >= 60) ? 3 : 4);
+                Text(buf, 64 - TextWidth(buf, sc) / 2.0f, 32 - 3.5f * sc, sc);
+                break;
+            }
+            case kMomGoodnight:
+                if (t >= 60 && t < 100) Text("BUENAS NOCHES", 64 - TextWidth("BUENAS NOCHES", 1) / 2.0f, 55, 1);
+                break;
+            default:
+                break;
+        }
     }
 
     void Draw(DeviceState state = kDeviceStateIdle) {
@@ -1436,15 +2274,28 @@ private:
         for (auto& e : cur_) { e.x += sx; e.y += sy; }
         mouth_.x += sx; mouth_.y += sy;
 
-        DrawEye(0);
-        DrawEye(1);
-        DrawMouth();
+        if (!hide_face_) {
+            DrawEye(0);
+            DrawEye(1);
+            DrawMouth();
+        }
 
         for (auto& e : cur_) { e.x -= sx; e.y -= sy; }
         mouth_.x -= sx; mouth_.y -= sy;
 
         DrawParticles();
         DrawOverlays(state);
+
+        // Buenas noches: la imagen se cierra en un circulo y se apaga
+        if (moment_ == kMomGoodnight && moment_t_ >= 95) {
+            float r = (kGoodnightTicks - moment_t_) * 4.0f;
+            for (int y = 0; y < kH; y++) {
+                for (int x = 0; x < kW; x++) {
+                    float dx = x - 64.0f, dy = y - 30.0f;
+                    if (dx * dx + dy * dy > r * r) fb_[y][x] = 0;
+                }
+            }
+        }
     }
 
     // Pasa el cuadro al canvas y solo invalida la zona que cambio
