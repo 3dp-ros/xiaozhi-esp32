@@ -11,7 +11,8 @@
 // fugaz que sigue con la mirada, una mosca que lo distrae, silba con notas
 // musicales, ojitos de gato, mirada picara, toma mate, bosteza, estornuda,
 // tiene hipo, hace globos de chicle, cabecea, se marea, sigue una pelotita,
-// pasa un gato, asoma una perrita que ladra, se le posa un pajarito y
+// asoma un gatito que le hace el parpadeo lento, asoma una perrita que
+// ladra, se le posa un pajarito y
 // muestra la hora. Con el contexto de Home Assistant (kira_context.h)
 // reacciona a la lluvia, el calor, el frio y se pone auriculares si suena
 // musica. Al activar el modo dormir bosteza, dice buenas noches y se apaga.
@@ -387,13 +388,12 @@ private:
                 hit_t_ = -100;
                 break;
             }
-            case kMomCatWalk: {                                // pasa un gato
+            case kMomCatWalk:                                  // asoma un gatito
                 StartMoment(m, 200);
-                int dir = Rand(2) ? 1 : -1;
-                ox_ = dir > 0 ? -18 : 146;
-                ovx_ = 0.9f * dir;
+                oaux_ = Rand(2);                               // 0 = izquierda, 1 = derecha
+                ox_ = oaux_ ? 109 : 19;
+                oy_ = 84;
                 break;
-            }
             case kMomDogWalk:                                  // asoma la perrita
                 StartMoment(m, 190);
                 oaux_ = Rand(2);                               // 0 = izquierda, 1 = derecha
@@ -674,17 +674,12 @@ private:
                 }
                 break;
             }
-            case kMomCatWalk: {
-                ox_ += ovx_;
-                look_tx_ = Clamp((ox_ - 64) / 7, -8, 8);
+            case kMomCatWalk:
+                // sube despacito, mira, parpadea lento, maulla y se va
+                oy_ = Approach(oy_, t < 175 ? 50.0f : 84.0f, t < 175 ? 0.12f : 0.2f);
+                look_tx_ = oaux_ ? 3.0f : -3.0f;
                 look_ty_ = 1.5f;
-                bool gone = ovx_ > 0 ? ox_ > 146 : ox_ < -18;
-                if (gone) {
-                    look_tx_ = look_ty_ = 0;
-                    if (moment_left_ > 12) moment_left_ = 12;
-                }
                 break;
-            }
             case kMomDogWalk:
                 // sube desde abajo, se queda ladrando y vuelve a bajar
                 oy_ = Approach(oy_, t < 165 ? 50.0f : 84.0f, t < 165 ? 0.15f : 0.2f);
@@ -1195,9 +1190,13 @@ private:
                 break;
             }
             case kMomCatWalk:
-                if (fabsf(ox_ - 64) < 22) {
-                    want_[0] = want_[1] = kArcUp;    // ternura
+                if (oy_ < 78) head(oaux_ ? -15.0f : 15.0f, -5.0f);
+                if (t >= 72 && t < 96) {
+                    want_[0] = want_[1] = kClosed;   // le devuelve el parpadeo lento
                     mk = kMUwu; mw = 12; mh = 4;
+                } else if (t >= 96 && t < 170) {
+                    want_[0] = want_[1] = kCat;      // contento
+                    mk = kMSmileBig; mw = 15; mh = 6;
                 } else {
                     mk = kMSmile; mw = 12; mh = 5;
                 }
@@ -1472,8 +1471,9 @@ private:
                 }
                 break;
             case kMomCatWalk:
-                if (fabsf(ox_ - 64) <= 0.45f) {
-                    Spawn(kPartHeart, 64, 12, 0, -0.5f, 26, 6);
+                if (t == 84) {
+                    // corazon que sube arriba del gatito
+                    Spawn(kPartHeart, ox_, oy_ - 21, 0, -0.6f, 34, 6);
                 }
                 break;
             case kMomBird:
@@ -2102,25 +2102,63 @@ private:
         (void)state;
     }
 
-    // Gatito caminando por abajo (dir 1 = hacia la derecha)
-    void DrawCat(float x, float dir, int step) {
-        const float by = 58.5f;
-        Ellipse(x, by, 7.5f, 3.2f);                       // cuerpo
-        float hx = x + dir * 8, hy = 54.5f;
-        Ellipse(hx, hy, 3.2f, 3.0f);                      // cabeza
-        for (int s = -1; s <= 1; s += 2) {                // orejas
-            Line(hx + s * 2.4f, hy - 1.5f, hx + s * 2.2f, hy - 4.6f, 0.5f);
-            Line(hx + s * 2.2f, hy - 4.6f, hx + s * 0.6f, hy - 2.5f, 0.5f);
+    // Triangulo relleno (orejas del gatito)
+    void Tri(float x0, float y0, float x1, float y1, float x2, float y2, uint8_t v = 1) {
+        int xa = (int)floorf(fminf(x0, fminf(x1, x2))), xb = (int)ceilf(fmaxf(x0, fmaxf(x1, x2)));
+        int ya = (int)floorf(fminf(y0, fminf(y1, y2))), yb = (int)ceilf(fmaxf(y0, fmaxf(y1, y2)));
+        float d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+        if (fabsf(d) < 0.01f) return;
+        for (int y = ya; y <= yb; y++) {
+            for (int x = xa; x <= xb; x++) {
+                float px = x + 0.5f, py = y + 0.5f;
+                float a = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / d;
+                float b = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / d;
+                if (a >= 0 && b >= 0 && a + b <= 1) Px(x, y, v);
+            }
         }
-        Px((int)lroundf(hx + dir * 1.3f), (int)lroundf(hy - 0.5f), 0);   // ojito
-        float tx = x - dir * 7, sw = 1.5f * sinf(step * 0.15f);
-        Line(tx, by - 1, tx - dir * 3, by - 5, 0.6f);     // cola
-        Line(tx - dir * 3, by - 5, tx - dir * 2 + sw, by - 9, 0.6f);
-        int ph = (step / 4) % 2;
-        for (int k = 0; k < 4; k++) {                     // patitas
-            float lx = x - 5.5f + k * 3.7f;
-            float off = ((k + ph) % 2) ? 1.0f : -0.5f;
-            Line(lx, by + 2, lx + off * dir, 63, 0.55f);
+    }
+
+    // Cabeza de gatito de frente asomando desde abajo: orejas en punta,
+    // ojos con pupila finita que miran a los costados, bigotes y boquita.
+    // Parpadea lento (en idioma gato: "te quiero") y despues maulla.
+    void DrawCatFace(float cx, float cy, float out, int t) {
+        const float k = 1.3f;
+        bool meow = (t >= 112 && t < 122) || (t >= 130 && t < 138);
+        if (meow) cy -= 1.0f;
+        Ellipse(cx, cy, 20, 17, 0);                         // borde apagado
+        for (int s = -1; s <= 1; s += 2) {                  // orejas
+            float tw = (s > 0 && (t % 70) >= 40 && (t % 70) < 44) ? 1.5f : 0;   // la mueve
+            Tri(cx + s * 3.0f * k, cy - 7.5f * k, cx + s * 9.8f * k, cy - 3.5f * k,
+                cx + s * (9.0f * k + tw), cy - 13.0f * k + tw);
+        }
+        Ring(cx, cy, 10.0f * k, 8.5f * k, 1.5f);            // cabeza
+        bool slow_blink = t >= 60 && t < 84;
+        float look = 0;
+        if (t >= 22 && t < 56) look = ((t - 22) / 10) % 2 ? 1.0f : -1.0f;
+        for (int s = -1; s <= 1; s += 2) {                  // ojos
+            float ex = cx + s * 4.0f * k, ey = cy - 1.2f * k;
+            if (slow_blink || (t % 55) < 2) {
+                Arc(ex, ey - 0.5f, 2.2f, 1.6f, 0.6f);        // ︶ cerrados
+            } else {
+                Ellipse(ex, ey, 2.3f, 2.6f);
+                Line(ex + look, ey - 1.8f, ex + look, ey + 1.8f, 0.45f, 0);   // pupila
+            }
+        }
+        float ny = cy + 2.2f * k;
+        Tri(cx - 1.6f, ny - 0.8f, cx + 1.6f, ny - 0.8f, cx, ny + 1.0f);  // naricita
+        if (meow) {
+            Ring(cx, ny + 3.3f, 1.9f, 2.0f, 0.9f);           // "miau"
+            float a0 = -1.5708f + out * 0.7f - 0.5f;
+            CircleArc(cx + out * 8, cy - 10, 4.0f, a0, a0 + 1.0f, 0.5f);
+            CircleArc(cx + out * 8, cy - 10, 7.0f, a0, a0 + 1.0f, 0.5f);
+        } else {
+            Line(cx, ny + 1, cx - 2.0f, ny + 2.6f, 0.45f);   // boquita "w"
+            Line(cx, ny + 1, cx + 2.0f, ny + 2.6f, 0.45f);
+        }
+        for (int s = -1; s <= 1; s += 2) {                  // bigotes
+            float wx = cx + s * 7.5f * k;
+            Line(wx, ny, wx + s * 6.5f, ny - 1.2f, 0.4f);
+            Line(wx, ny + 2, wx + s * 6.5f, ny + 2.8f, 0.4f);
         }
     }
 
@@ -2239,12 +2277,10 @@ private:
                 }
                 break;
             }
-            case kMomCatWalk: {
-                float dir = ovx_ > 0 ? 1.0f : -1.0f;
-                if (ox_ < -16 || ox_ > 144) break;
-                DrawCat(ox_, dir, t);
+            case kMomCatWalk:
+                if (oy_ > 78) break;
+                DrawCatFace(ox_, oy_, oaux_ ? 1.0f : -1.0f, t);
                 break;
-            }
             case kMomDogWalk: {
                 if (oy_ > 78) break;
                 bool barking = (t >= 50 && t < 58) || (t >= 85 && t < 93);
