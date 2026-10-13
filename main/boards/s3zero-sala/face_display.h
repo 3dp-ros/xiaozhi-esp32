@@ -11,7 +11,8 @@
 // fugaz que sigue con la mirada, una mosca que lo distrae, silba con notas
 // musicales, ojitos de gato, mirada picara, toma mate, bosteza, estornuda,
 // tiene hipo, hace globos de chicle, cabecea, se marea, sigue una pelotita,
-// pasa uno de los gatos (Robin, Nina, Marcia), se le posa un pajarito y
+// pasa un gato, pasa una perrita que se frena a ladrar, se le posa un
+// pajarito y
 // muestra la hora. Con el contexto de Home Assistant (kira_context.h)
 // reacciona a la lluvia, el calor, el frio y se pone auriculares si suena
 // musica. Al activar el modo dormir bosteza, dice buenas noches y se apaga.
@@ -116,7 +117,7 @@ private:
     enum Moment { kMomNone, kMomContent, kMomCat, kMomPicaro, kMomWow, kMomWhistle,
                   kMomStar, kMomFly, kMomMate, kMomYawn, kMomSneeze, kMomHiccup, kMomGum,
                   kMomDoze, kMomDizzy, kMomBall, kMomCatWalk, kMomBird, kMomRain, kMomHot,
-                  kMomCold, kMomMusic, kMomClock, kMomGoodnight };
+                  kMomCold, kMomMusic, kMomClock, kMomGoodnight, kMomDogWalk };
     enum PartKind { kPartNone, kPartHeart, kPartTear, kPartZ, kPartSpark, kPartStreak,
                     kPartSpeck, kPartNote, kPartDrop, kPartPuff, kPartBang, kPartJa,
                     kPartSweat, kPartHic, kPartSnow, kPartSpray };
@@ -146,7 +147,6 @@ private:
     static constexpr int kMaxParticles = 18;
     static constexpr int kHic[4] = {12, 40, 62, 90};     // cuando hipa
     static constexpr int kGoodnightTicks = 115;          // bostezo + buenas noches
-    static constexpr const char* kCatNames[3] = {"ROBIN", "NINA", "MARCIA"};
 
     // ---------------- objetos LVGL ----------------
     lv_obj_t* original_ = nullptr;
@@ -199,7 +199,7 @@ private:
     float star_x_ = 0, star_y_ = 0;     // estrella fugaz (momento)
     // objeto del momento (mate, pelotita, gato, pajarito) en pixeles
     float ox_ = 0, oy_ = 0, ovx_ = 0, ovy_ = 0;
-    int oaux_ = 0;                      // gato elegido / ojo del pajarito
+    int oaux_ = 0;                      // ojo donde se posa el pajarito
     int hit_t_ = -100;                  // ultimo pique de la pelotita
     bool hide_face_ = false;            // la hora tapa la cara
     bool goodnight_pending_ = false;    // se activo dormir: falta despedirse
@@ -322,7 +322,7 @@ private:
             {kMomWhistle, music ? 0 : 2},      {kMomStar, 2},    {kMomFly, 2},
             {kMomMate, 2},    {kMomYawn, 2},   {kMomSneeze, 1},  {kMomHiccup, 1},
             {kMomGum, 2},     {kMomDoze, 1},   {kMomDizzy, 1},   {kMomBall, 2},
-            {kMomCatWalk, 3}, {kMomBird, 2},   {kMomClock, clock ? 2 : 0},
+            {kMomCatWalk, 3}, {kMomDogWalk, 3}, {kMomBird, 2},   {kMomClock, clock ? 2 : 0},
             {kMomRain, weather == kira_ctx::kWeatherRain ? 5 : 0},
             {kMomHot, weather == kira_ctx::kWeatherHot ? 5 : 0},
             {kMomCold, weather == kira_ctx::kWeatherCold ? 5 : 0},
@@ -393,7 +393,14 @@ private:
                 int dir = Rand(2) ? 1 : -1;
                 ox_ = dir > 0 ? -18 : 146;
                 ovx_ = 0.9f * dir;
-                oaux_ = Rand(3);
+                break;
+            }
+            case kMomDogWalk: {                                // pasa la perrita
+                StartMoment(m, 240);
+                int dir = Rand(2) ? 1 : -1;
+                ox_ = dir > 0 ? -20 : 148;
+                ovx_ = 1.0f * dir;
+                hit_t_ = -100;                                 // cuando se freno
                 break;
             }
             case kMomBird:                                     // pajarito en la cabeza
@@ -675,6 +682,21 @@ private:
                 look_tx_ = Clamp((ox_ - 64) / 7, -8, 8);
                 look_ty_ = 1.5f;
                 bool gone = ovx_ > 0 ? ox_ > 146 : ox_ < -18;
+                if (gone) {
+                    look_tx_ = look_ty_ = 0;
+                    if (moment_left_ > 12) moment_left_ = 12;
+                }
+                break;
+            }
+            case kMomDogWalk: {
+                // camina, se frena en el medio a mover la cola y ladrar, sigue
+                if (hit_t_ < 0 && fabsf(ox_ - 64) <= 0.5f) hit_t_ = t;
+                bool stopped = hit_t_ >= 0 && t - hit_t_ < 60;
+                if (!stopped) ox_ += ovx_;
+                if (hit_t_ >= 0 && (t - hit_t_ == 15 || t - hit_t_ == 35)) bounce_t_ = 0;
+                look_tx_ = stopped ? 0 : Clamp((ox_ - 64) / 7, -8, 8);
+                look_ty_ = 1.5f;
+                bool gone = ovx_ > 0 ? ox_ > 148 : ox_ < -20;
                 if (gone) {
                     look_tx_ = look_ty_ = 0;
                     if (moment_left_ > 12) moment_left_ = 12;
@@ -1187,6 +1209,15 @@ private:
                 if (fabsf(ox_ - 64) < 22) {
                     want_[0] = want_[1] = kArcUp;    // ternura
                     mk = kMUwu; mw = 12; mh = 4;
+                } else {
+                    mk = kMSmile; mw = 12; mh = 5;
+                }
+                break;
+            case kMomDogWalk:
+                if (hit_t_ >= 0 && t - hit_t_ < 60) {
+                    want_[0] = want_[1] = kCat;      // contento con la perrita
+                    mk = kMSmileBig; mw = 15; mh = 6;
+                    fx_sparks_ = 1;
                 } else {
                     mk = kMSmile; mw = 12; mh = 5;
                 }
@@ -2102,6 +2133,38 @@ private:
         }
     }
 
+    // Perrita caminando por abajo: orejas caidas, hocico y cola que se mueve
+    void DrawDog(float x, float dir, int step, bool stopped, bool barking) {
+        const float by = 57.5f;
+        Ellipse(x, by, 8.0f, 3.6f);                       // cuerpo
+        float hx = x + dir * 8.5f, hy = 53.0f;
+        Ellipse(hx, hy, 3.4f, 3.0f);                      // cabeza
+        float sx = hx + dir * 3.2f, sy = barking ? 53.5f : 54.2f;
+        Ellipse(sx, sy, 2.2f, 1.5f);                      // hocico
+        if (barking) Line(sx - dir * 1.0f, sy + 1.6f, sx + dir * 1.8f, sy + 2.4f, 0.5f);
+        Px((int)lroundf(sx + dir * 2.0f), (int)lroundf(sy - 1.0f));       // nariz
+        Px((int)lroundf(hx + dir * 1.0f), (int)lroundf(hy - 0.8f), 0);   // ojito
+        // oreja caida con un borde apagado para que se distinga
+        Line(hx - dir * 0.8f, hy - 2.6f, hx - dir * 3.4f, hy + 3.6f, 1.4f, 0);
+        Line(hx - dir * 0.8f, hy - 2.6f, hx - dir * 3.4f, hy + 3.6f, 0.85f);
+        // cola: rapidito cuando esta contenta
+        float wag = 2.5f * sinf(step * (stopped ? 1.3f : 0.4f));
+        float tx = x - dir * 7.5f;
+        Line(tx, by - 1.5f, tx - dir * 3 + wag, by - 7, 0.6f);
+        int ph = stopped ? 0 : (step / 4) % 2;
+        for (int k = 0; k < 4; k++) {                     // patas
+            float lx = x - 6 + k * 4.0f;
+            float off = stopped ? 0 : (((k + ph) % 2) ? 1.0f : -0.5f);
+            Line(lx, by + 2.5f, lx + off * dir, 63, 0.6f);
+        }
+        if (barking) {
+            // ¡guau! ondas que salen del hocico
+            float a0 = dir > 0 ? -0.7f : 3.14159f - 0.7f;
+            CircleArc(sx + dir * 2, sy, 3.5f, a0, a0 + 1.4f, 0.5f);
+            CircleArc(sx + dir * 2, sy, 6.0f, a0, a0 + 1.4f, 0.5f);
+        }
+    }
+
     // Pajarito (f = 1 mira a la derecha)
     void DrawBird(float x, float y, float f, bool flying, bool wing_up, bool peck) {
         Ellipse(x, y, 6.5f, 5.0f, 0);                     // borde apagado
@@ -2187,8 +2250,15 @@ private:
                 float dir = ovx_ > 0 ? 1.0f : -1.0f;
                 if (ox_ < -16 || ox_ > 144) break;
                 DrawCat(ox_, dir, t);
-                const char* name = kCatNames[oaux_];
-                Text(name, 64 - TextWidth(name, 1) / 2.0f, 0, 1);
+                break;
+            }
+            case kMomDogWalk: {
+                float dir = ovx_ > 0 ? 1.0f : -1.0f;
+                if (ox_ < -18 || ox_ > 146) break;
+                bool stopped = hit_t_ >= 0 && t - hit_t_ < 60;
+                int bark = hit_t_ >= 0 ? t - hit_t_ : -1;
+                bool barking = (bark >= 15 && bark < 22) || (bark >= 35 && bark < 42);
+                DrawDog(ox_, dir, t, stopped, barking);
                 break;
             }
             case kMomBird: {
