@@ -204,6 +204,7 @@ private:
     bool hide_face_ = false;            // la hora tapa la cara
     bool goodnight_pending_ = false;    // se activo dormir: falta despedirse
     int sleep_prev_ = -1;
+    Moment last_moment_ = kMomNone;     // la ultima del reposo (no se repite)
 
     // detalles pedidos por la pose actual
     int fx_hearts_ = 0, fx_tears_ = 0, fx_z_ = 0, fx_sparks_ = 0, fx_streaks_ = 0;
@@ -329,10 +330,15 @@ private:
             {kMomMusic, music ? 12 : 0},
         };
         int total = 0;
-        for (auto& o : opts) total += o.w;
+        for (auto& o : opts) {
+            if (o.m != last_moment_) total += o.w;   // no repite la anterior
+        }
+        if (total == 0) return;
         int r = Rand(total);
         for (auto& o : opts) {
+            if (o.m == last_moment_) continue;
             if (r < o.w) {
+                last_moment_ = o.m;
                 BeginMoment(o.m);
                 return;
             }
