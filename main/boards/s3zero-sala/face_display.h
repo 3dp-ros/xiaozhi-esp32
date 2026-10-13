@@ -11,8 +11,7 @@
 // fugaz que sigue con la mirada, una mosca que lo distrae, silba con notas
 // musicales, ojitos de gato, mirada picara, toma mate, bosteza, estornuda,
 // tiene hipo, hace globos de chicle, cabecea, se marea, sigue una pelotita,
-// pasa un gato, pasa una perrita que se frena a ladrar, se le posa un
-// pajarito y
+// pasa un gato, asoma una perrita que ladra, se le posa un pajarito y
 // muestra la hora. Con el contexto de Home Assistant (kira_context.h)
 // reacciona a la lluvia, el calor, el frio y se pone auriculares si suena
 // musica. Al activar el modo dormir bosteza, dice buenas noches y se apaga.
@@ -395,14 +394,12 @@ private:
                 ovx_ = 0.9f * dir;
                 break;
             }
-            case kMomDogWalk: {                                // pasa la perrita
-                StartMoment(m, 240);
-                int dir = Rand(2) ? 1 : -1;
-                ox_ = dir > 0 ? -20 : 148;
-                ovx_ = 1.0f * dir;
-                hit_t_ = -100;                                 // cuando se freno
+            case kMomDogWalk:                                  // asoma la perrita
+                StartMoment(m, 190);
+                oaux_ = Rand(2);                               // 0 = izquierda, 1 = derecha
+                ox_ = oaux_ ? 109 : 19;
+                oy_ = 78;
                 break;
-            }
             case kMomBird:                                     // pajarito en la cabeza
                 StartMoment(m, 170);
                 oaux_ = Rand(2);
@@ -688,21 +685,13 @@ private:
                 }
                 break;
             }
-            case kMomDogWalk: {
-                // camina, se frena en el medio a mover la cola y ladrar, sigue
-                if (hit_t_ < 0 && fabsf(ox_ - 64) <= 0.5f) hit_t_ = t;
-                bool stopped = hit_t_ >= 0 && t - hit_t_ < 60;
-                if (!stopped) ox_ += ovx_;
-                if (hit_t_ >= 0 && (t - hit_t_ == 15 || t - hit_t_ == 35)) bounce_t_ = 0;
-                look_tx_ = stopped ? 0 : Clamp((ox_ - 64) / 7, -8, 8);
+            case kMomDogWalk:
+                // sube desde abajo, se queda ladrando y vuelve a bajar
+                oy_ = Approach(oy_, t < 165 ? 50.0f : 84.0f, t < 165 ? 0.15f : 0.2f);
+                if (t == 50 || t == 85) bounce_t_ = 0;
+                look_tx_ = oaux_ ? 3.0f : -3.0f;
                 look_ty_ = 1.5f;
-                bool gone = ovx_ > 0 ? ox_ > 148 : ox_ < -20;
-                if (gone) {
-                    look_tx_ = look_ty_ = 0;
-                    if (moment_left_ > 12) moment_left_ = 12;
-                }
                 break;
-            }
             case kMomBird: {
                 float px, py;
                 BirdPerch(px, py);
@@ -1214,7 +1203,9 @@ private:
                 }
                 break;
             case kMomDogWalk:
-                if (hit_t_ >= 0 && t - hit_t_ < 60) {
+                // corre la cara al otro lado y un poco arriba para hacerle lugar
+                if (oy_ < 74) head(oaux_ ? -12.0f : 12.0f, -4.0f);
+                if (t >= 50 && t < 160) {
                     want_[0] = want_[1] = kCat;      // contento con la perrita
                     mk = kMSmileBig; mw = 15; mh = 6;
                     fx_sparks_ = 1;
@@ -2133,35 +2124,37 @@ private:
         }
     }
 
-    // Perrita caminando por abajo: orejas caidas, hocico y cola que se mueve
-    void DrawDog(float x, float dir, int step, bool stopped, bool barking) {
-        const float by = 57.5f;
-        Ellipse(x, by, 8.0f, 3.6f);                       // cuerpo
-        float hx = x + dir * 8.5f, hy = 53.0f;
-        Ellipse(hx, hy, 3.4f, 3.0f);                      // cabeza
-        float sx = hx + dir * 3.2f, sy = barking ? 53.5f : 54.2f;
-        Ellipse(sx, sy, 2.2f, 1.5f);                      // hocico
-        if (barking) Line(sx - dir * 1.0f, sy + 1.6f, sx + dir * 1.8f, sy + 2.4f, 0.5f);
-        Px((int)lroundf(sx + dir * 2.0f), (int)lroundf(sy - 1.0f));       // nariz
-        Px((int)lroundf(hx + dir * 1.0f), (int)lroundf(hy - 0.8f), 0);   // ojito
-        // oreja caida con un borde apagado para que se distinga
-        Line(hx - dir * 0.8f, hy - 2.6f, hx - dir * 3.4f, hy + 3.6f, 1.4f, 0);
-        Line(hx - dir * 0.8f, hy - 2.6f, hx - dir * 3.4f, hy + 3.6f, 0.85f);
-        // cola: rapidito cuando esta contenta
-        float wag = 2.5f * sinf(step * (stopped ? 1.3f : 0.4f));
-        float tx = x - dir * 7.5f;
-        Line(tx, by - 1.5f, tx - dir * 3 + wag, by - 7, 0.6f);
-        int ph = stopped ? 0 : (step / 4) % 2;
-        for (int k = 0; k < 4; k++) {                     // patas
-            float lx = x - 6 + k * 4.0f;
-            float off = stopped ? 0 : (((k + ph) % 2) ? 1.0f : -0.5f);
-            Line(lx, by + 2.5f, lx + off * dir, 63, 0.6f);
+    // Cabeza de perrita de frente asomando desde abajo, dibujada con linea:
+    // orejas caidas rellenas, ojitos, nariz, boquita y lengua que jadea.
+    // out = lado de afuera de la pantalla (los ladridos salen para ahi).
+    void DrawDog(float cx, float cy, float out, int t, bool barking) {
+        const float k = 1.3f;
+        if (barking) cy -= 1.5f;
+        Ellipse(cx, cy + 1, 20, 15, 0);                     // borde apagado
+        Ring(cx, cy, 9.5f * k, 8.5f * k, 1.5f);             // cabeza
+        for (int s = -1; s <= 1; s += 2) {                  // orejas caidas
+            float sw = 0.8f * sinf(t * 0.3f + s);
+            Ellipse(cx + s * 10.5f * k, cy + 1.0f * k + sw, 3.0f * k, 6.0f * k);
         }
+        bool blink = (t % 60) < 3;
+        for (int s = -1; s <= 1; s += 2) {                  // ojitos
+            float ex = cx + s * 3.8f * k, ey = cy - 1.5f * k;
+            if (blink) Line(ex - 1.5f, ey, ex + 1.5f, ey, 0.6f);
+            else Ellipse(ex, ey, 1.6f, 2.0f);
+        }
+        Ellipse(cx, cy + 2.0f * k, 2.5f, 1.6f);             // nariz
         if (barking) {
-            // ¡guau! ondas que salen del hocico
-            float a0 = dir > 0 ? -0.7f : 3.14159f - 0.7f;
-            CircleArc(sx + dir * 2, sy, 3.5f, a0, a0 + 1.4f, 0.5f);
-            CircleArc(sx + dir * 2, sy, 6.0f, a0, a0 + 1.4f, 0.5f);
+            Ellipse(cx, cy + 5.0f * k, 2.8f, 2.3f);         // boca abierta
+            // ¡guau! ondas en diagonal hacia afuera
+            float a0 = -1.5708f + out * 0.7f - 0.5f;
+            CircleArc(cx + out * 8, cy - 9, 4.0f, a0, a0 + 1.0f, 0.5f);
+            CircleArc(cx + out * 8, cy - 9, 7.0f, a0, a0 + 1.0f, 0.5f);
+        } else {
+            float my = cy + 3.0f * k;
+            Line(cx, my, cx - 2.3f, my + 2.0f, 0.5f);        // boquita "w"
+            Line(cx, my, cx + 2.3f, my + 2.0f, 0.5f);
+            float pant = ((t / 5) % 2) ? 1.0f : 0.0f;        // jadea
+            Ellipse(cx + 0.6f, cy + 6.6f * k + pant, 1.9f, 2.4f);   // lengua
         }
     }
 
@@ -2253,12 +2246,9 @@ private:
                 break;
             }
             case kMomDogWalk: {
-                float dir = ovx_ > 0 ? 1.0f : -1.0f;
-                if (ox_ < -18 || ox_ > 146) break;
-                bool stopped = hit_t_ >= 0 && t - hit_t_ < 60;
-                int bark = hit_t_ >= 0 ? t - hit_t_ : -1;
-                bool barking = (bark >= 15 && bark < 22) || (bark >= 35 && bark < 42);
-                DrawDog(ox_, dir, t, stopped, barking);
+                if (oy_ > 78) break;
+                bool barking = (t >= 50 && t < 58) || (t >= 85 && t < 93);
+                DrawDog(ox_, oy_, oaux_ ? 1.0f : -1.0f, t, barking);
                 break;
             }
             case kMomBird: {
