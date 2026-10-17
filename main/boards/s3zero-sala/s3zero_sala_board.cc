@@ -12,6 +12,7 @@
 #include "kira_controls.h"
 #include "diag_led.h"
 #include "end_chat.h"
+#include "home_command.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -182,6 +183,7 @@ private:
 
     void InitializeTools() {
         end_chat::Register();
+        home_command::Register();
     }
 
 public:

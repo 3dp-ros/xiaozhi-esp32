@@ -23,6 +23,10 @@
 // reproduce con su reproductor de notificaciones. El paso texto -> audio lo
 // hace el script "Kira decir" en HA (ver instrucciones).
 //
+// Ordenes de la casa: la herramienta self.home.command (home_command.h)
+// publica {"texto": "apaga la luz del taller"} en kira/sala/comando y HA
+// la resuelve con su propio Assist local (automatizacion "Kira - ordenes").
+//
 // Contexto: HA publica {"clima":..,"musica":..,"hora":..} en
 // kira/sala/contexto (ver kira_context.h) y la cara lo usa en reposo.
 
@@ -45,6 +49,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <deque>
 #include <string>
 
 class HaBridge {
@@ -63,6 +68,16 @@ public:
 
     // Conexion MQTT con Home Assistant (para el LED de diagnostico)
     bool IsConnected() const { return mqtt_ok_.load(); }
+
+    // Encola una orden en lenguaje natural para Home Assistant. Devuelve
+    // false si no hay conexion con el broker (asi Kira no dice "listo" en falso)
+    bool SendCommand(const std::string& text) {
+        if (!mqtt_ok_.load()) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (commands_.size() >= 4) commands_.pop_front();   // cola acotada
+        commands_.push_back(text);
+        return true;
+    }
 
     // Llamado por la pantalla cuando cambia la emocion
     void OnEmotion(const char* emotion) {
@@ -92,6 +107,7 @@ private:
     std::atomic<bool> mqtt_ok_{false};
 
     std::string emotion_ = "neutral";
+    std::deque<std::string> commands_;
     std::string pending_url_;
     std::string pending_text_;
     int pending_wait_ = 0;
@@ -358,6 +374,27 @@ private:
         }
     }
 
+    void SendPendingCommands() {
+        while (true) {
+            std::string text;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (commands_.empty()) return;
+                text = commands_.front();
+                commands_.pop_front();
+            }
+            cJSON* root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "texto", text.c_str());
+            char* json = cJSON_PrintUnformatted(root);
+            if (json != nullptr) {
+                ESP_LOGI(kTag, "Orden para Home Assistant: %s", text.c_str());
+                mqtt_->Publish(T("comando"), json, 1);
+                cJSON_free(json);
+            }
+            cJSON_Delete(root);
+        }
+    }
+
     void ProcessPendingSay() {
         std::string url, text;
         {
@@ -414,6 +451,7 @@ private:
                     continue;
                 }
             }
+            SendPendingCommands();
             PublishStates();
             ProcessPendingSay();
             vTaskDelay(pdMS_TO_TICKS(200));
