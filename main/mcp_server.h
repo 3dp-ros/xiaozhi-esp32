@@ -57,6 +57,10 @@ class PropertyList;
 using ReturnValue = std::variant<bool, int, std::string, cJSON*, ImageContent*>;
 using ToolResult = std::expected<ReturnValue, std::string>;
 using ToolCallback = std::function<ToolResult(const PropertyList&)>;
+// Herramienta asincrona: recibe una funcion "done" que debe llamar UNA vez
+// (desde cualquier tarea) cuando tenga el resultado. No bloquea la tarea principal.
+using AsyncToolDone = std::function<void(ToolResult)>;
+using AsyncToolCallback = std::function<void(const PropertyList&, AsyncToolDone)>;
 
 enum PropertyType { kPropertyTypeBoolean, kPropertyTypeInteger, kPropertyTypeString };
 
@@ -263,6 +267,7 @@ private:
     std::string description_;
     PropertyList properties_;
     ToolCallback callback_;
+    AsyncToolCallback async_callback_;
     bool user_only_ = false;
 
 public:
@@ -270,7 +275,18 @@ public:
             ToolCallback callback)
         : name_(name), description_(description), properties_(properties), callback_(callback) {}
 
+    McpTool(const std::string& name, const std::string& description, const PropertyList& properties,
+            AsyncToolCallback async_callback)
+        : name_(name),
+          description_(description),
+          properties_(properties),
+          async_callback_(std::move(async_callback)) {}
+
     void set_user_only(bool user_only) { user_only_ = user_only; }
+    inline bool is_async() const { return async_callback_ != nullptr; }
+    void CallAsync(const PropertyList& properties, AsyncToolDone done) {
+        async_callback_(properties, std::move(done));
+    }
     inline const std::string& name() const { return name_; }
     inline const std::string& description() const { return description_; }
     inline const PropertyList& properties() const { return properties_; }
@@ -347,7 +363,11 @@ public:
     }
 
     std::expected<std::string, std::string> Call(const PropertyList& properties) {
-        auto callback_result = callback_(properties);
+        return FormatResult(callback_(properties));
+    }
+
+    // Arma el resultado MCP (JSON) a partir de lo que devolvio la herramienta
+    static std::expected<std::string, std::string> FormatResult(ToolResult callback_result) {
         if (!callback_result) {
             return std::unexpected(std::move(callback_result.error()));
         }
@@ -433,6 +453,8 @@ public:
     void AddTool(std::unique_ptr<McpTool> tool);
     void AddTool(const std::string& name, const std::string& description,
                  const PropertyList& properties, ToolCallback callback);
+    void AddAsyncTool(const std::string& name, const std::string& description,
+                      const PropertyList& properties, AsyncToolCallback callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description,
                          const PropertyList& properties, ToolCallback callback);
     void ParseMessage(const cJSON* json, ResponseSender response_sender = nullptr);

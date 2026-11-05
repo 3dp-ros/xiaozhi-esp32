@@ -24,8 +24,11 @@
 // hace el script "Kira decir" en HA (ver instrucciones).
 //
 // Ordenes de la casa: la herramienta self.home.command (home_command.h)
-// publica {"texto": "apaga la luz del taller"} en kira/sala/comando y HA
-// la resuelve con su propio Assist local (automatizacion "Kira - ordenes").
+// publica {"id": 7, "texto": "apaga la luz del taller"} en kira/sala/comando.
+// HA la resuelve con su Assist local (automatizacion "Kira - ordenes de la
+// casa") y contesta {"id": 7, "ok": true, "respuesta": "Encendido"} en
+// kira/sala/comando/respuesta. Kira espera esa respuesta (hasta 8 s) antes
+// de decir si lo hizo o no.
 //
 // Contexto: HA publica {"clima":..,"musica":..,"hora":..} en
 // kira/sala/contexto (ver kira_context.h) y la cara lo usa en reposo.
@@ -44,12 +47,16 @@
 #include <freertos/task.h>
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include <functional>
+#include <utility>
+#include <vector>
 #include <string>
 
 class HaBridge {
@@ -69,14 +76,28 @@ public:
     // Conexion MQTT con Home Assistant (para el LED de diagnostico)
     bool IsConnected() const { return mqtt_ok_.load(); }
 
-    // Encola una orden en lenguaje natural para Home Assistant. Devuelve
-    // false si no hay conexion con el broker (asi Kira no dice "listo" en falso)
-    bool SendCommand(const std::string& text) {
-        if (!mqtt_ok_.load()) return false;
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (commands_.size() >= 4) commands_.pop_front();   // cola acotada
-        commands_.push_back(text);
-        return true;
+    // Resultado de una orden: ok, y lo que contesto Home Assistant
+    using CommandDone = std::function<void(bool ok, const std::string& reply)>;
+
+    // Manda una orden en lenguaje natural a Home Assistant y llama a "done"
+    // (una sola vez, desde la tarea del puente) con lo que conteste HA, o con
+    // error si no hay conexion o no responde a tiempo.
+    void SendCommand(const std::string& text, CommandDone done) {
+        if (!mqtt_ok_.load()) {
+            done(false, "Home Assistant no esta conectado");
+            return;
+        }
+        CommandDone dropped;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (commands_.size() >= 4) {                  // acotado
+                dropped = std::move(commands_.front().done);
+                commands_.pop_front();
+            }
+            commands_.push_back({next_command_id_++, text, esp_timer_get_time(), false,
+                                 std::move(done)});
+        }
+        if (dropped) dropped(false, "demasiadas ordenes juntas");
     }
 
     // Llamado por la pantalla cuando cambia la emocion
@@ -107,7 +128,16 @@ private:
     std::atomic<bool> mqtt_ok_{false};
 
     std::string emotion_ = "neutral";
-    std::deque<std::string> commands_;
+    struct PendingCommand {
+        int id;
+        std::string text;
+        int64_t since_us;
+        bool sent;
+        CommandDone done;
+    };
+    std::deque<PendingCommand> commands_;
+    int next_command_id_ = 1;
+    static constexpr int64_t kCommandTimeoutUs = 8 * 1000 * 1000;
     std::string pending_url_;
     std::string pending_text_;
     int pending_wait_ = 0;
@@ -199,6 +229,7 @@ private:
         mqtt_->Subscribe(T("silencio/set"), 1);
         mqtt_->Subscribe(T("noche/set"), 1);
         mqtt_->Subscribe(T("contexto"), 1);
+        mqtt_->Subscribe(T("comando/respuesta"), 1);
         mqtt_->Subscribe("homeassistant/status", 1);
         PublishDiscovery();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -236,6 +267,8 @@ private:
                 auto display = Board::GetInstance().GetDisplay();
                 if (display != nullptr) display->SetEmotion(emo.c_str());
             });
+        } else if (topic == T("comando/respuesta")) {
+            OnCommandReply(payload);
         } else if (topic == T("contexto")) {
             OnContext(payload);
         } else if (topic == T("escuchar")) {
@@ -374,20 +407,81 @@ private:
         }
     }
 
-    void SendPendingCommands() {
-        while (true) {
-            std::string text;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (commands_.empty()) return;
-                text = commands_.front();
-                commands_.pop_front();
+    // {"id": 7, "ok": true, "respuesta": "Encendido"}
+    void OnCommandReply(const std::string& payload) {
+        cJSON* root = cJSON_Parse(payload.c_str());
+        if (root == nullptr) {
+            ESP_LOGW(kTag, "Respuesta de orden con JSON invalido");
+            return;
+        }
+        cJSON* id = cJSON_GetObjectItem(root, "id");
+        cJSON* ok = cJSON_GetObjectItem(root, "ok");
+        cJSON* reply = cJSON_GetObjectItem(root, "respuesta");
+        int cid = cJSON_IsNumber(id) ? id->valueint : -1;
+        bool success = cJSON_IsTrue(ok);
+        std::string text = cJSON_IsString(reply) ? reply->valuestring : "";
+        cJSON_Delete(root);
+
+        CommandDone done;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto it = commands_.begin(); it != commands_.end(); ++it) {
+                if (it->id == cid) {
+                    done = std::move(it->done);
+                    commands_.erase(it);
+                    break;
+                }
             }
+        }
+        if (done) {
+            ESP_LOGI(kTag, "Home Assistant respondio a la orden %d: %s (%s)", cid,
+                     success ? "ok" : "error", text.c_str());
+            done(success, text);
+        }
+    }
+
+    void FailAllCommands(const char* why) {
+        std::deque<PendingCommand> all;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            all.swap(commands_);
+        }
+        for (auto& c : all) {
+            if (c.done) c.done(false, why);
+        }
+    }
+
+    // Publica las ordenes nuevas y vence las que HA no contesto a tiempo
+    void SendPendingCommands() {
+        std::vector<std::pair<int, std::string>> to_send;
+        std::vector<CommandDone> expired;
+        int64_t now = esp_timer_get_time();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto it = commands_.begin(); it != commands_.end();) {
+                if (now - it->since_us > kCommandTimeoutUs) {
+                    ESP_LOGW(kTag, "Home Assistant no respondio la orden %d", it->id);
+                    expired.push_back(std::move(it->done));
+                    it = commands_.erase(it);
+                    continue;
+                }
+                if (!it->sent) {
+                    it->sent = true;
+                    to_send.emplace_back(it->id, it->text);
+                }
+                ++it;
+            }
+        }
+        for (auto& done : expired) {
+            done(false, "Home Assistant no respondio a tiempo");
+        }
+        for (auto& [cid, text] : to_send) {
             cJSON* root = cJSON_CreateObject();
+            cJSON_AddNumberToObject(root, "id", cid);
             cJSON_AddStringToObject(root, "texto", text.c_str());
             char* json = cJSON_PrintUnformatted(root);
             if (json != nullptr) {
-                ESP_LOGI(kTag, "Orden para Home Assistant: %s", text.c_str());
+                ESP_LOGI(kTag, "Orden %d para Home Assistant: %s", cid, text.c_str());
                 mqtt_->Publish(T("comando"), json, 1);
                 cJSON_free(json);
             }
@@ -447,6 +541,7 @@ private:
                 if (!result) {
                     ESP_LOGW(kTag, "No se pudo conectar al broker %s:%d, reintento en 15 s",
                              HA_MQTT_HOST, HA_MQTT_PORT);
+                    FailAllCommands("Home Assistant no esta conectado");
                     vTaskDelay(pdMS_TO_TICKS(15000));
                     continue;
                 }

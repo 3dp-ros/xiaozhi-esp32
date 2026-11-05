@@ -344,6 +344,11 @@ void McpServer::AddTool(const std::string& name, const std::string& description,
     AddTool(std::make_unique<McpTool>(name, description, properties, std::move(callback)));
 }
 
+void McpServer::AddAsyncTool(const std::string& name, const std::string& description,
+                             const PropertyList& properties, AsyncToolCallback callback) {
+    AddTool(std::make_unique<McpTool>(name, description, properties, std::move(callback)));
+}
+
 void McpServer::AddUserOnlyTool(const std::string& name, const std::string& description,
                                 const PropertyList& properties, ToolCallback callback) {
     auto tool = std::make_unique<McpTool>(name, description, properties, std::move(callback));
@@ -613,6 +618,26 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
+    if (tool->is_async()) {
+        // La herramienta contesta despues (cuando llegue su resultado); la
+        // respuesta se manda desde la tarea principal.
+        app.Schedule([this, id, tool, arguments = std::move(arguments),
+                      response_sender = std::move(response_sender)]() mutable {
+            tool->CallAsync(arguments, [this, id, response_sender](ToolResult tool_result) {
+                auto result = McpTool::FormatResult(std::move(tool_result));
+                Application::GetInstance().Schedule(
+                    [this, id, result = std::move(result), response_sender]() {
+                        if (!result) {
+                            ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
+                            ReplyError(id, result.error(), response_sender);
+                            return;
+                        }
+                        ReplyResult(id, *result, response_sender);
+                    });
+            });
+        });
+        return;
+    }
     app.Schedule([this, id, tool, arguments = std::move(arguments),
                   response_sender = std::move(response_sender)]() {
         auto result = tool->Call(arguments);
