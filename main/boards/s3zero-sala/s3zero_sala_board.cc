@@ -183,7 +183,7 @@ private:
 
     void InitializeTools() {
         end_chat::Register();
-        home_command::Register();
+        // home_command::Register();  // ordenes por MQTT: desactivado, se usa el puente MCP de HA
     }
 
 public:
